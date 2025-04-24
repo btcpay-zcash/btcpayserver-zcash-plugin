@@ -29,7 +29,6 @@ using Microsoft.Extensions.Localization;
 namespace BTCPayServer.Plugins.ZCash.Controllers
 {
     [Route("stores/{storeId}/Zcashlike")]
-    [OnlyIfSupportAttribute("ZEC-CHAIN")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie)]
     [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
     [Authorize(Policy = Policies.CanModifyServerSettings, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
@@ -58,20 +57,23 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
         [HttpGet()]
         public async Task<IActionResult> GetStoreZcashLikePaymentMethods()
         {
-            var Zcash = StoreData.GetPaymentMethodConfigs<ZcashPaymentMethodConfig>(_handlers);
-
-            var excludeFilters = StoreData.GetStoreBlob().GetExcludedPaymentMethods();
+            return View("/Views/Zcash/GetStoreZcashLikePaymentMethods.cshtml", await GetVM(StoreData));
+        }
+[NonAction]
+        public async Task<ZcashLikePaymentMethodListViewModel> GetVM(StoreData storeData)
+        {
+            var excludeFilters = storeData.GetStoreBlob().GetExcludedPaymentMethods();
 
             var accountsList = _ZcashLikeConfiguration.ZcashLikeConfigurationItems.ToDictionary(pair => pair.Key,
                 pair => GetAccounts(pair.Key));
 
             await Task.WhenAll(accountsList.Values);
-            return View("/Views/ZCash/GetStoreZcashLikePaymentMethods.cshtml", new ZcashLikePaymentMethodListViewModel()
+            return new ZcashLikePaymentMethodListViewModel()
             {
                 Items = _ZcashLikeConfiguration.ZcashLikeConfigurationItems.Select(pair =>
                     GetZcashLikePaymentMethodViewModel(StoreData, pair.Key, excludeFilters,
                         accountsList[pair.Key].Result))
-            });
+            };
         }
 
         private Task<GetAccountsResponse> GetAccounts(string cryptoCode)
@@ -89,11 +91,14 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
         }
 
         private ZcashLikePaymentMethodViewModel GetZcashLikePaymentMethodViewModel(
-            StoreData store, string cryptoCode,
+            StoreData storeData, string cryptoCode,
             IPaymentFilter excludeFilters, GetAccountsResponse accountsResponse)
         {
-            var Zcash = store.GetPaymentMethodConfigs<ZcashPaymentMethodConfig>(_handlers);
-            var settings = Zcash.SingleOrDefault(method => ((IHasNetwork)_handlers[method.Key]).Network.CryptoCode == cryptoCode).Value;
+            var Zcash = storeData.GetPaymentMethodConfigs(_handlers)
+                .Where(s => s.Value is ZcashPaymentPromptDetails)
+                .Select(s => (PaymentMethodId: s.Key, Details: (ZcashPaymentPromptDetails)s.Value));
+            var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
+            var settings = Zcash.Where(method => method.PaymentMethodId == pmi).Select(m => m.Details).SingleOrDefault();
             _ZcashRpcProvider.Summaries.TryGetValue(cryptoCode, out var summary);
             _ZcashLikeConfiguration.ZcashLikeConfigurationItems.TryGetValue(cryptoCode,
                 out var configurationItem);
@@ -127,7 +132,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
 
             var vm = GetZcashLikePaymentMethodViewModel(StoreData, cryptoCode,
                 StoreData.GetStoreBlob().GetExcludedPaymentMethods(), await GetAccounts(cryptoCode));
-            return View("/Views/ZCash/GetStoreZcashLikePaymentMethod.cshtml", vm);
+            return View("/Views/Zcash/GetStoreZcashLikePaymentMethod.cshtml", vm);
         }
 
         [DisableRequestSizeLimit]
@@ -245,13 +250,13 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                 vm.Enabled = viewModel.Enabled;
                 vm.NewAccountLabel = viewModel.NewAccountLabel;
                 vm.AccountIndex = viewModel.AccountIndex;
-                return View("/Views/ZCash/GetStoreZcashLikePaymentMethod.cshtml", vm);
+                return View(vm);
             }
 
             var storeData = StoreData;
             var blob = storeData.GetStoreBlob();
             var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
-            storeData.SetPaymentMethodConfig(_handlers[pmi], new ZcashPaymentMethodConfig()
+            storeData.SetPaymentMethodConfig(_handlers[pmi], new ZcashPaymentPromptDetails()
             {
                 AccountIndex = viewModel.AccountIndex
             });

@@ -67,6 +67,7 @@ namespace BTCPayServer.Plugins.ZCash.Payments
 
             var feeRatePerByte = feeRatePerKb.Fee / 1024;
 
+            context.Prompt.Destination = address.Address;
             context.Prompt.PaymentMethodFee = ZcashMoney.Convert(feeRatePerByte * 100);
             context.Prompt.Details = JObject.FromObject(new ZcashPaymentPromptDetails()
             {
