@@ -28,7 +28,7 @@ dotnet run
 
 ```sh
 dotnet publish
-cd BTCPayServer/bin/Release/net8.0/publish/
+cd bin/Release/net8.0/publish/
 zip BTCPayServer.Plugins.ZCash.btcpay BTCPayServer.Plugins.ZCash.pdb BTCPayServer.Plugins.ZCash.dll BTCPayServer.Plugins.ZCash.deps.json
 ```
 
