@@ -2,13 +2,35 @@
 
 This plugin extends BTCPay Server to enable users to receive payments via Zcash.
 
-> [!WARNING]
-> This plugin isn't maintained and nobody but the original author knows how it works. (@hhanh00)
+## Getting Started
 
-We are looking for a maintainer.
-It seems that this plugin is more or less a copy-paste of the better-maintained [Monero Plugin](https://github.com/btcpayserver/btcpayserver-monero-plugin).
+### Installing the Plugin
 
-If ZCash is a fork of Monero, it is probably possible to support both in the same plugin easily.
+*Not yet published.*
+
+You can test this plugin with a manual build using these steps:
+
+### Creating and Running a Local Build
+
+> Git clone this repository and `cd` into it
+
+```sh
+cd btcpayserver
+dotnet build .
+cd ..
+dotnet build .
+
+cd btcpayserver
+dotnet run
+```
+
+### Creating a Production Build Locally
+
+```sh
+dotnet publish
+cd BTCPayServer/bin/Release/net8.0/publish/
+zip BTCPayServer.Plugins.ZCash.btcpay BTCPayServer.Plugins.ZCash.pdb BTCPayServer.Plugins.ZCash.dll BTCPayServer.Plugins.ZCash.deps.json
+```
 
 ## Configuration
 
