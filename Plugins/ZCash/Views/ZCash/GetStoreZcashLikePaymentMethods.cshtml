@@ -1,9 +1,11 @@
-@using BTCPayServer.Views.Stores
 @model BTCPayServer.Plugins.ZCash.Controllers.UIZcashLikeStoreController.ZcashLikePaymentMethodListViewModel
 
 @{
-    ViewData.SetActivePage(StoreNavPages.OnchainSettings, StringLocalizer["{0} Settings", "Zcash"], $"{Context.GetStoreData().Id}-ZEC");
+    ViewData.SetActivePage("Zcash Settings", StringLocalizer["{0} Settings", "Zcash"], "Zcash Settings");
+    Layout = "_Layout";
 }
+
+<partial name="_StatusMessage" />
 
 <div class="row">
     <div class="col-md-8">
