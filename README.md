@@ -9,9 +9,9 @@ This plugin extends BTCPayServer to enable users to receive payments via Zcash.
 
 ### Installing the Plugin
 
-*Not yet published.*
+[docs/installation.md](./docs/installation.md)
 
-You can create a test build of the plugin manually using these steps:
+You can create a local test build of the plugin manually using these steps:
 
 ### Cloning the Project
 
