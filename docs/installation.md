@@ -1,5 +1,7 @@
 # Installation Instructions
 
+Please reference these docs: https://docs.btcpayserver.org/Docker/#full-installation-for-technical-users
+
 <!-- For the official documentation, refer to [Full installation (for technical users) - docs.btcpayserver.org](https://docs.btcpayserver.org/Docker/#full-installation-for-technical-users) -->
 
 
