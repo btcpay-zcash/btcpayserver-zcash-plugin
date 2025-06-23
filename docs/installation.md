@@ -42,6 +42,33 @@ export BTCPAYGEN_CRYPTO3='zec'
 . btcpay-setup.sh -i
 ```
 
+## Lightwalletd Custom Docker Volume
+
+**`docker-compose-generator/docker-fragments/opt-zcash-example.custom.yml`**
+
+```yml
+services:
+  zebra:
+    volumes:
+      - docker_zebrad-cache:/home/zebra/.cache/zebra
+  lightwalletd:
+    volumes:
+      - docker_lwd-cache:/var/lib/lightwalletd/db
+
+volumes:
+  docker_zebrad-cache:
+    external: true
+  docker_lwd-cache:
+    external: true
+required:
+  - "zcash"
+```
+
+```sh
+export BTCPAYGEN_ADDITIONAL_FRAGMENTS="$BTCPAYGEN_ADDITIONAL_FRAGMENTS;opt-zcash-example.custom"
+. ./btcpay-setup.sh -i
+```
+
 ## Setup Your (View-Only) Zcash Wallet
 
 Use a mobile or desktop wallet such as YWallet or Zingo, that supports a Viewing Key export.
