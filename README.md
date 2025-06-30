@@ -29,7 +29,7 @@ dotnet build .
 cd ..
 dotnet build .
 
-cd btcpayserver
+cd btcpayserver/BTCPayServer
 dotnet run
 ```
 
