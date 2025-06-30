@@ -11,6 +11,16 @@ This plugin extends BTCPayServer to enable users to receive payments via Zcash.
 
 [docs/installation.md](./docs/installation.md)
 
+## Full Node
+
+Running a full node (with `zebra` and `lightwalletd`)
+
+```sh
+export BTCPAYGEN_EXCLUDE_FRAGMENTS="$BTCPAYGEN_EXCLUDE_FRAGMENTS;zcash"
+export BTCPAYGEN_ADDITIONAL_FRAGMENTS="$BTCPAYGEN_ADDITIONAL_FRAGMENTS;zcash-fullnode"
+. ./btcpay-setup.sh -i
+```
+
 You can create a local test build of the plugin manually using these steps:
 
 ### Cloning the Project

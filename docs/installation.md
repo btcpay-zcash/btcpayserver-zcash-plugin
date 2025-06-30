@@ -23,6 +23,16 @@ export BTCPAYGEN_REVERSEPROXY="nginx"
 . ./btcpay-setup.sh -i
 ```
 
+## Full Node
+
+Running a full node (with `zebra` and `lightwalletd`)
+
+```sh
+export BTCPAYGEN_EXCLUDE_FRAGMENTS="$BTCPAYGEN_EXCLUDE_FRAGMENTS;zcash"
+export BTCPAYGEN_ADDITIONAL_FRAGMENTS="$BTCPAYGEN_ADDITIONAL_FRAGMENTS;zcash-fullnode"
+. ./btcpay-setup.sh -i
+```
+
 ## Existing BTCPayServer Instance
 
 As root, run `. btcpay-setup.sh`; this will show you the environment variable it is expecting. For example, if you support `btc` and `ltc` already, and want to add `zec`:
@@ -44,28 +54,37 @@ export BTCPAYGEN_CRYPTO3='zec'
 
 ## Lightwalletd Custom Docker Volume
 
-**`docker-compose-generator/docker-fragments/opt-zcash-example.custom.yml`**
+Manually create a custom fragment:
+
+**[`docker-compose-generator/docker-fragments/zcash-lightwalletd.custom.yml`](docs/zcash-lightwalletd.custom.yml)**
+
+**Example Changes (will not work by itself)**
 
 ```yml
 services:
   zebra:
+    # ...
     volumes:
       - docker_zebrad-cache:/home/zebra/.cache/zebra
   lightwalletd:
+    # ...
     volumes:
       - docker_lwd-cache:/var/lib/lightwalletd/db
 
 volumes:
+  # ...
   docker_zebrad-cache:
     external: true
   docker_lwd-cache:
     external: true
-required:
-  - "zcash"
+
+exclusive:
+  - zcash-node
 ```
 
 ```sh
-export BTCPAYGEN_ADDITIONAL_FRAGMENTS="$BTCPAYGEN_ADDITIONAL_FRAGMENTS;opt-zcash-example.custom"
+export BTCPAYGEN_EXCLUDE_FRAGMENTS="$BTCPAYGEN_EXCLUDE_FRAGMENTS;zcash;zcash-fullnode"
+export BTCPAYGEN_ADDITIONAL_FRAGMENTS="$BTCPAYGEN_ADDITIONAL_FRAGMENTS;zcash-lightwalletd.custom"
 . ./btcpay-setup.sh -i
 ```
 
