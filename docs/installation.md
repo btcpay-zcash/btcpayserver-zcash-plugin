@@ -56,7 +56,7 @@ export BTCPAYGEN_CRYPTO3='zec'
 
 Manually create a custom fragment:
 
-**[`docker-compose-generator/docker-fragments/zcash-lightwalletd.custom.yml`](docs/zcash-lightwalletd.custom.yml)**
+**[`docker-compose-generator/docker-fragments/zcash-lightwalletd.custom.yml`](./zcash-lightwalletd.custom.yml)**
 
 **Example Changes (will not work by itself)**
 
