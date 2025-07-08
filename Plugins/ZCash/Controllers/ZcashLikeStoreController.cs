@@ -147,7 +147,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             {
                 WalletFileFound = System.IO.File.Exists(configAddress),
                 Enabled =
-                    settings != null &&
+                    // settings != null &&
                     !excludeFilters.Match(PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode)),
                 Summary = summary,
                 CryptoCode = cryptoCode,
