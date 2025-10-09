@@ -241,11 +241,21 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                     }
 
                     var fileAddress = Path.Combine(configurationItem.WalletDirectory, "config.json");
+                    var fileAddress2 = Path.Combine(configurationItem.WalletDirectory, "config2.json");
 
                     JsonObject json;
                     if (System.IO.File.Exists(fileAddress))
                     {
                         using (var fs = new FileStream(fileAddress, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
+                        using (var reader = new StreamReader(fs))
+                        {
+                            var jsonText = await reader.ReadToEndAsync();
+                            json = JsonNode.Parse(jsonText)?.AsObject() ?? new JsonObject();
+                        }
+                    }
+                    else if (System.IO.File.Exists(fileAddress))
+                    {
+                        using (var fs = new FileStream(fileAddress2, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
                         using (var reader = new StreamReader(fs))
                         {
                             var jsonText = await reader.ReadToEndAsync();
