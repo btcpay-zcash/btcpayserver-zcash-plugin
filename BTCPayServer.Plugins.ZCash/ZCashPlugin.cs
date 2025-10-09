@@ -43,8 +43,9 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             DefaultRateRules = new[]
             {
                     "ZEC_X = ZEC_BTC * BTC_X",
-                    "ZEC_BTC = kraken(ZEC_BTC)",
-                    "ZEC_USD = kraken(ZEC_USD)"
+                    "ZEC_BTC = binance(ZEC_BTC)",
+                    "ZEC_USD = kraken(ZEC_USD)",
+                    "ZEC_EUR = kraken(ZEC_EUR)"
                 },
             CryptoImagePath = "zcash.png",
             UriScheme = "zcash"
