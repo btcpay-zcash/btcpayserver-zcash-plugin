@@ -110,7 +110,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                     $"{account.AccountIndex} - {(string.IsNullOrEmpty(account.Label) ? "No label" : account.Label)}",
                     account.AccountIndex.ToString(CultureInfo.InvariantCulture)));
 
-            var configAddress = Path.Combine(configurationItem.WalletDirectory, "config.json");
+            var configAddress = Path.Combine(configurationItem.WalletDirectory, configurationItem.ConfigFile);
 
             JsonObject json;
             if (System.IO.File.Exists(configAddress))
@@ -240,22 +240,12 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                         }
                     }
 
-                    var fileAddress = Path.Combine(configurationItem.WalletDirectory, "config.json");
-                    var fileAddress2 = Path.Combine(configurationItem.WalletDirectory, "config2.json");
+                    var fileAddress = Path.Combine(configurationItem.WalletDirectory, configurationItem.ConfigFile);
 
                     JsonObject json;
                     if (System.IO.File.Exists(fileAddress))
                     {
                         using (var fs = new FileStream(fileAddress, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
-                        using (var reader = new StreamReader(fs))
-                        {
-                            var jsonText = await reader.ReadToEndAsync();
-                            json = JsonNode.Parse(jsonText)?.AsObject() ?? new JsonObject();
-                        }
-                    }
-                    else if (System.IO.File.Exists(fileAddress))
-                    {
-                        using (var fs = new FileStream(fileAddress2, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
                         using (var reader = new StreamReader(fs))
                         {
                             var jsonText = await reader.ReadToEndAsync();
@@ -317,7 +307,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                 AccountIndex = viewModel.AccountIndex
             });
 
-            var fileConfig = Path.Combine(configurationItem.WalletDirectory, "config.json");
+            var fileConfig = Path.Combine(configurationItem.WalletDirectory, configurationItem.ConfigFile);
 
             JsonObject jsonObj;
             if (System.IO.File.Exists(fileConfig))
