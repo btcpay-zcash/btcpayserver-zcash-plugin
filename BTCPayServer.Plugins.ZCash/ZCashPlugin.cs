@@ -98,9 +98,9 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             var walletDaemonWalletDirectory =
                 configuration.GetOrDefault<string?>(
                     $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_walletdir", null);
-            var walletDaemonConfigPath =
+            var walletDaemonConfigFile =
                 configuration.GetOrDefault<string?>(
-                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_config_path", "config.json");
+                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_config_path", Path.Combine(walletDaemonWalletDirectory, "config.json"));
             if (daemonUri == null || walletDaemonUri == null || walletDaemonWalletDirectory == null)
             {
                 throw new ConfigException($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode} is misconfigured");
@@ -111,7 +111,7 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
                 DaemonRpcUri = daemonUri,
                 InternalWalletRpcUri = walletDaemonUri,
                 WalletDirectory = walletDaemonWalletDirectory,
-                ConfigFile = walletDaemonConfigPath
+                ConfigFile = walletDaemonConfigFile
             });
         }
         return result;

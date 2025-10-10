@@ -240,12 +240,12 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                         }
                     }
 
-                    var fileAddress = Path.Combine(configurationItem.WalletDirectory, configurationItem.ConfigFile);
+                    var fileConfig = configurationItem.ConfigFile;
 
                     JsonObject json;
-                    if (System.IO.File.Exists(fileAddress))
+                    if (System.IO.File.Exists(fileConfig))
                     {
-                        using (var fs = new FileStream(fileAddress, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
+                        using (var fs = new FileStream(fileConfig, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
                         using (var reader = new StreamReader(fs))
                         {
                             var jsonText = await reader.ReadToEndAsync();
@@ -264,13 +264,13 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
 
                         string jsonOutput = JsonSerializer.Serialize(json, new JsonSerializerOptions { WriteIndented = true });
 
-                        using (var fs = new FileStream(fileAddress, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
+                        using (var fs = new FileStream(fileConfig, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
                         using (var writer = new StreamWriter(fs))
                         {
                             await writer.WriteAsync(jsonOutput);
                         }
 
-                        Exec($"chmod 666 {fileAddress}");
+                        Exec($"chmod 666 {fileConfig}");
                     }
                     catch
                     {
@@ -307,7 +307,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                 AccountIndex = viewModel.AccountIndex
             });
 
-            var fileConfig = Path.Combine(configurationItem.WalletDirectory, configurationItem.ConfigFile);
+            var fileConfig = configurationItem.ConfigFile;
 
             JsonObject jsonObj;
             if (System.IO.File.Exists(fileConfig))
