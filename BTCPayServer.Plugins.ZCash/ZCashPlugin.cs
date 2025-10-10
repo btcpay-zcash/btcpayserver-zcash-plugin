@@ -1,6 +1,7 @@
 using BTCPayServer.Services;
 using System.Globalization;
 using System.Linq;
+using System.IO;
 using NBitcoin;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection;
