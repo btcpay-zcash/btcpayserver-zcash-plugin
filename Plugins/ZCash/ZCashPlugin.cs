@@ -106,7 +106,12 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             {
                 throw new ConfigException($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode} is misconfigured");
             }
+            // Temp patch
             if (System.IO.File.Exists(Path.Combine(walletDaemonWalletDirectory, "zec-wallet2.db")) && walletDaemonConfigFile == Path.Combine(walletDaemonWalletDirectory, "config.json")) {
+                walletDaemonConfigFile = Path.Combine(walletDaemonWalletDirectory, "config2.json");
+            }
+            // Temp patch
+            if (walletDaemonConfigFile == "/data/config2.json") {
                 walletDaemonConfigFile = Path.Combine(walletDaemonWalletDirectory, "config2.json");
             }
 
