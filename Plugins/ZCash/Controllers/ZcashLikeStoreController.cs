@@ -110,12 +110,12 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                     $"{account.AccountIndex} - {(string.IsNullOrEmpty(account.Label) ? "No label" : account.Label)}",
                     account.AccountIndex.ToString(CultureInfo.InvariantCulture)));
 
-            var configAddress = Path.Combine(configurationItem.WalletDirectory, "config.json");
+            var configFile = configurationItem.ConfigFile;
 
             JsonObject json;
-            if (System.IO.File.Exists(configAddress))
+            if (System.IO.File.Exists(configFile))
             {
-                using (var fs = new FileStream(configAddress, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
+                using (var fs = new FileStream(configFile, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
                 using (var reader = new StreamReader(fs))
                 {
                     var jsonText = reader.ReadToEnd();
@@ -145,7 +145,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
 
             return new ZcashLikePaymentMethodViewModel()
             {
-                WalletFileFound = System.IO.File.Exists(configAddress),
+                WalletFileFound = System.IO.File.Exists(configFile),
                 Enabled =
                     // settings != null &&
                     !excludeFilters.Match(PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode)),
@@ -240,22 +240,12 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                         }
                     }
 
-                    var fileAddress = Path.Combine(configurationItem.WalletDirectory, "config.json");
-                    var fileAddress2 = Path.Combine(configurationItem.WalletDirectory, "config2.json");
+                    var configFile = configurationItem.ConfigFile;
 
                     JsonObject json;
-                    if (System.IO.File.Exists(fileAddress))
+                    if (System.IO.File.Exists(configFile))
                     {
-                        using (var fs = new FileStream(fileAddress, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
-                        using (var reader = new StreamReader(fs))
-                        {
-                            var jsonText = await reader.ReadToEndAsync();
-                            json = JsonNode.Parse(jsonText)?.AsObject() ?? new JsonObject();
-                        }
-                    }
-                    else if (System.IO.File.Exists(fileAddress))
-                    {
-                        using (var fs = new FileStream(fileAddress2, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
+                        using (var fs = new FileStream(configFile, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
                         using (var reader = new StreamReader(fs))
                         {
                             var jsonText = await reader.ReadToEndAsync();
@@ -274,13 +264,13 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
 
                         string jsonOutput = JsonSerializer.Serialize(json, new JsonSerializerOptions { WriteIndented = true });
 
-                        using (var fs = new FileStream(fileAddress, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
+                        using (var fs = new FileStream(configFile, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
                         using (var writer = new StreamWriter(fs))
                         {
                             await writer.WriteAsync(jsonOutput);
                         }
 
-                        Exec($"chmod 666 {fileAddress}");
+                        Exec($"chmod 666 {configFile}");
                     }
                     catch
                     {
@@ -317,7 +307,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                 AccountIndex = viewModel.AccountIndex
             });
 
-            var fileConfig = Path.Combine(configurationItem.WalletDirectory, "config.json");
+            var fileConfig = configurationItem.ConfigFile;
 
             JsonObject jsonObj;
             if (System.IO.File.Exists(fileConfig))
@@ -440,7 +430,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             }
         }
 
-        
+
         public enum ZcashLikeSettlementThresholdChoice
         {
             [Display(Name = "Store Speed Policy", Description = "Use the store's speed policy")]

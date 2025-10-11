@@ -1,6 +1,7 @@
 using BTCPayServer.Services;
 using System.Globalization;
 using System.Linq;
+using System.IO;
 using NBitcoin;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection;
@@ -43,8 +44,9 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             DefaultRateRules = new[]
             {
                     "ZEC_X = ZEC_BTC * BTC_X",
-                    "ZEC_BTC = kraken(ZEC_BTC)",
-                    "ZEC_USD = kraken(ZEC_USD)"
+                    "ZEC_BTC = binance(ZEC_BTC)",
+                    "ZEC_USD = kraken(ZEC_USD)",
+                    "ZEC_EUR = kraken(ZEC_EUR)"
                 },
             CryptoImagePath = "zcash.png",
             UriScheme = "zcash"
@@ -97,16 +99,28 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             var walletDaemonWalletDirectory =
                 configuration.GetOrDefault<string?>(
                     $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_walletdir", null);
+            var walletDaemonConfigFile =
+                configuration.GetOrDefault<string?>(
+                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_config_path", Path.Combine(walletDaemonWalletDirectory, "config.json"));
             if (daemonUri == null || walletDaemonUri == null || walletDaemonWalletDirectory == null)
             {
                 throw new ConfigException($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode} is misconfigured");
+            }
+            // Temp patch
+            if (System.IO.File.Exists(Path.Combine(walletDaemonWalletDirectory, "zec-wallet2.db")) && walletDaemonConfigFile == Path.Combine(walletDaemonWalletDirectory, "config.json")) {
+                walletDaemonConfigFile = Path.Combine(walletDaemonWalletDirectory, "config2.json");
+            }
+            // Temp patch
+            if (walletDaemonConfigFile == "/data/config2.json") {
+                walletDaemonConfigFile = Path.Combine(walletDaemonWalletDirectory, "config2.json");
             }
 
             result.ZcashLikeConfigurationItems.Add(ZcashLikeSpecificBtcPayNetwork.CryptoCode, new ZcashLikeConfigurationItem()
             {
                 DaemonRpcUri = daemonUri,
                 InternalWalletRpcUri = walletDaemonUri,
-                WalletDirectory = walletDaemonWalletDirectory
+                WalletDirectory = walletDaemonWalletDirectory,
+                ConfigFile = walletDaemonConfigFile
             });
         }
         return result;
@@ -125,4 +139,3 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
         }
     }
 }
-
