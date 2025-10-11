@@ -14,5 +14,6 @@ namespace BTCPayServer.Plugins.ZCash.Configuration
         public Uri DaemonRpcUri { get; set; }
         public Uri InternalWalletRpcUri { get; set; }
         public string WalletDirectory { get; set; }
+        public string ConfigFile { get; set; }
     }
 }
