@@ -52,8 +52,8 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             UriScheme = "zcash"
         };
         var blockExplorerLink = chainName == ChainName.Mainnet
-                    ? "https://www.exploreZcash.com/transaction/{0}"
-                    : "https://testnet.xmrchain.net/tx/{0}";
+                    ? "https://mainnet.zcashexplorer.app/transactions/{0}"
+                    : "https://testnet.zcashexplorer.app/transactions/{0}";
         var pmi = PaymentTypes.CHAIN.GetPaymentMethodId("ZEC");
         services.AddDefaultPrettyName(pmi, network.DisplayName);
         services.AddBTCPayNetwork(network)
