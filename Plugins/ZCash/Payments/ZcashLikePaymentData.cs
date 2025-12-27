@@ -13,5 +13,6 @@ namespace BTCPayServer.Plugins.ZCash.Payments
         public long BlockHeight { get; set; }
         public long ConfirmationCount { get; set; }
         public string TransactionId { get; set; }
+        public long? InvoiceSettledConfirmationThreshold { get; set; }
     }
 }

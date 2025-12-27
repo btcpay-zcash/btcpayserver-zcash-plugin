@@ -43,7 +43,7 @@ namespace BTCPayServer.Plugins.ZCash.Payments
             if (details is not null)
             {
                 context.Model.ReceivedConfirmations = details.ConfirmationCount;
-                context.Model.RequiredConfirmations = (int)ZcashListener.ConfirmationsRequired(context.InvoiceEntity.SpeedPolicy);
+                context.Model.RequiredConfirmations = (int)ZcashListener.ConfirmationsRequired(details, context.InvoiceEntity.SpeedPolicy);
             }
             context.Model.InvoiceBitcoinUrl = paymentLinkExtension.GetPaymentLink(context.Prompt, context.UrlHelper);
             context.Model.InvoiceBitcoinUrlQR = context.Model.InvoiceBitcoinUrl;

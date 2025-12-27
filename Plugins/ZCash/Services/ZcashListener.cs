@@ -21,6 +21,7 @@ using Microsoft.Extensions.Logging;
 using NBitcoin;
 using NBitpayClient;
 using NBXplorer;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using static BTCPayServer.Client.Models.InvoicePaymentMethodDataModel;
 using BTCPayServer.Services;
@@ -122,9 +123,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
         private async Task UpdatePaymentStates(string cryptoCode, InvoiceEntity[] invoices)
         {
             if (!invoices.Any())
-            {
                 return;
-            }
 
             var ZcashWalletRpcClient = _ZcashRpcProvider.WalletRpcClients[cryptoCode];
             var network = _networkProvider.GetNetwork(cryptoCode);
@@ -132,99 +131,119 @@ namespace BTCPayServer.Plugins.ZCash.Services
             var paymentId = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
             var handler = (ZcashLikePaymentMethodHandler)_handlers[paymentId];
 
-            //get all the required data in one list (invoice, its existing payments and the current payment method details)
-            var expandedInvoices = invoices.Select(entity => (Invoice: entity,
-                    ExistingPayments: GetAllZcashLikePayments(entity, cryptoCode),
-                    Prompt: entity.GetPaymentPrompt(paymentId),
-                    PaymentMethodDetails: handler.ParsePaymentPromptDetails(entity.GetPaymentPrompt(paymentId).Details)))
-                .Select(tuple => (
+            // Prepare expanded invoices
+            var expandedInvoices = invoices.Select(entity => (
+                Invoice: entity,
+                ExistingPayments: GetAllZcashLikePayments(entity, cryptoCode),
+                Prompt: entity.GetPaymentPrompt(paymentId),
+                PaymentMethodDetails: handler.ParsePaymentPromptDetails(entity.GetPaymentPrompt(paymentId).Details)
+            ))
+            .Select(tuple => (
+                tuple.Invoice,
+                tuple.PaymentMethodDetails,
+                tuple.Prompt,
+                ExistingPayments: tuple.ExistingPayments.Select(ep => (
+                    Payment: ep,
+                    PaymentData: handler.ParsePaymentDetails(ep.Details),
                     tuple.Invoice,
-                    tuple.PaymentMethodDetails,
-                    tuple.Prompt,
-                    ExistingPayments: tuple.ExistingPayments.Select(entity =>
-                        (Payment: entity, PaymentData: handler.ParsePaymentDetails(entity.Details),
-                            tuple.Invoice))
-                ));
+                    tuple.Prompt
+                ))
+            ))
+            .ToList();
 
-            var existingPaymentData = expandedInvoices.SelectMany(tuple => tuple.ExistingPayments);
+            var existingPaymentData = expandedInvoices.SelectMany(tuple => tuple.ExistingPayments).ToList();
 
+            // Build account->subaddress query
             var accountToAddressQuery = new Dictionary<long, List<long>>();
-            //create list of subaddresses to account to query the Zcash wallet
             foreach (var expandedInvoice in expandedInvoices)
             {
-                var addressIndexList =
-                    accountToAddressQuery.GetValueOrDefault(expandedInvoice.PaymentMethodDetails.AccountIndex,
-                        new List<long>());
+                var addressIndexList = accountToAddressQuery.GetValueOrDefault(
+                    expandedInvoice.PaymentMethodDetails.AccountIndex,
+                    new List<long>()
+                );
 
-                addressIndexList.AddRange(
-                    expandedInvoice.ExistingPayments.Select(tuple => tuple.PaymentData.SubaddressIndex));
-                addressIndexList.Add(expandedInvoice.PaymentMethodDetails.AddressIndex);
-                accountToAddressQuery.AddOrReplace(expandedInvoice.PaymentMethodDetails.AccountIndex, addressIndexList);
+                addressIndexList.AddRange(expandedInvoice.ExistingPayments.Select(ep => ep.PaymentData.SubaddressIndex));
+                addressIndexList.Add(expandedInvoice.PaymentMethodDetails.AddressIndex - 1);
+                accountToAddressQuery[expandedInvoice.PaymentMethodDetails.AccountIndex] = addressIndexList;
             }
 
-            var tasks = accountToAddressQuery.ToDictionary(datas => datas.Key,
-                datas => ZcashWalletRpcClient.SendCommandAsync<GetTransfersRequest, GetTransfersResponse>(
+            // Send RPC commands
+            var tasks = accountToAddressQuery.ToDictionary(
+                kvp => kvp.Key,
+                kvp => ZcashWalletRpcClient.SendCommandAsync<GetTransfersRequest, GetTransfersResponse>(
                     "get_transfers",
-                    new GetTransfersRequest()
+                    new GetTransfersRequest
                     {
-                        AccountIndex = datas.Key,
+                        AccountIndex = kvp.Key,
                         In = true,
-                        SubaddrIndices = datas.Value.Distinct().ToList()
-                    }));
+                        SubaddrIndices = kvp.Value.Distinct().ToList()
+                    }
+                )
+            );
 
             await Task.WhenAll(tasks.Values);
 
-
-            var transferProcessingTasks = new List<Task>();
-
-            var updatedPaymentEntities = new List<(PaymentEntity Payment, InvoiceEntity invoice)>();
-            foreach (var keyValuePair in tasks)
+            var updatedPaymentEntities = new List<(PaymentEntity Payment, InvoiceEntity Invoice)>();
+            
+            // Process each account's transfers
+            foreach (var kvp in tasks)
             {
-                var transfers = keyValuePair.Value.Result.In;
-                if (transfers == null)
-                {
+                var response = await kvp.Value;
+                var transfers = response.In;
+                if (transfers == null || !transfers.Any())
                     continue;
-                }
 
-                transferProcessingTasks.AddRange(transfers.Select(transfer =>
+                foreach (var transfer in transfers)
                 {
-                    InvoiceEntity invoice = null;
-                    var existingMatch = existingPaymentData.SingleOrDefault(tuple =>
-                        tuple.Payment.Destination == transfer.Address &&
-                        tuple.PaymentData.TransactionId == transfer.Txid);
+                    // Console.WriteLine($"Processing transfer {transfer.Txid} -> {transfer.Address}, amount: {transfer.Amount}");
 
-                    if (existingMatch.Invoice != null)
+                    // Try to find existing invoice for this transfer
+                    var invoice = await _invoiceRepository.GetInvoiceFromAddress(paymentId, transfer.Address);
+                    Console.WriteLine($"paymentId: {paymentId}");
+
+                    if (invoice == null)
                     {
-                        invoice = existingMatch.Invoice;
+                        Console.WriteLine($"No invoice found for {transfer.Address}, skipping");
+                        continue; // skip this transfer
                     }
-                    else
-                    {
-                        var newMatch = expandedInvoices.SingleOrDefault(tuple =>
-                            tuple.Prompt.Destination == transfer.Address);
+                    // else
+                    // {
+                    //     // Fall back to invoice by prompt/destination
+                    //     var newMatch = expandedInvoices.SingleOrDefault(ei => ei.Prompt.Destination == transfer.Address);
+                    //     if (newMatch.Invoice == null)
+                    //     {
+                    //         Console.WriteLine($"No matching invoice for {transfer.Address}, skipping");
+                    //         continue;
+                    //     }
 
-                        if (newMatch.Invoice == null)
-                        {
-                            return Task.CompletedTask;
-                        }
+                    //     invoice = newMatch.Invoice;
+                    //     Console.WriteLine($"New invoice found: {invoice.Id}");
+                    // }
 
-                        invoice = newMatch.Invoice;
-                    }
-
-
-                    return HandlePaymentData(cryptoCode, transfer.Address, transfer.Amount, transfer.SubaddrIndex.Major,
-                        transfer.SubaddrIndex.Minor, transfer.Txid, transfer.Confirmations, transfer.Height, invoice,
-                        updatedPaymentEntities);
-                }));
+                    // Handle payment data
+                    await HandlePaymentData(
+                        cryptoCode,
+                        transfer.Address,
+                        transfer.Amount,
+                        transfer.SubaddrIndex.Major,
+                        transfer.SubaddrIndex.Minor,
+                        transfer.Txid,
+                        transfer.Confirmations,
+                        transfer.Height,
+                        invoice,
+                        updatedPaymentEntities
+                    );
+                }
             }
 
-            transferProcessingTasks.Add(
-                _paymentService.UpdatePayments(updatedPaymentEntities.Select(tuple => tuple.Item1).ToList()));
-            await Task.WhenAll(transferProcessingTasks);
-            foreach (var valueTuples in updatedPaymentEntities.GroupBy(entity => entity.Item2))
+            // Update all payments at once
+            if (updatedPaymentEntities.Any())
             {
-                if (valueTuples.Any())
+                await _paymentService.UpdatePayments(updatedPaymentEntities.Select(tuple => tuple.Payment).ToList());
+
+                foreach (var group in updatedPaymentEntities.GroupBy(tuple => tuple.Invoice))
                 {
-                    _eventAggregator.Publish(new Events.InvoiceNeedUpdateEvent(valueTuples.Key.Id));
+                    _eventAggregator.Publish(new Events.InvoiceNeedUpdateEvent(group.Key.Id));
                 }
             }
         }
@@ -241,7 +260,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             var transfer = await _ZcashRpcProvider.WalletRpcClients[cryptoCode]
                 .SendCommandAsync<GetTransferByTransactionIdRequest, GetTransferByTransactionIdResponse>(
                     "get_transfer_by_txid",
-                    new GetTransferByTransactionIdRequest() { TransactionId = transactionHash });
+                    new GetTransferByTransactionIdRequest() { TransactionId = transactionHash, AccountIndex = 0 });
 
             var paymentsToUpdate = new List<(PaymentEntity Payment, InvoiceEntity invoice)>();
 
@@ -287,6 +306,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             var network = _networkProvider.GetNetwork(cryptoCode);
             var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
             var handler = (ZcashLikePaymentMethodHandler)_handlers[pmi];
+            var promptDetails = handler.ParsePaymentPromptDetails(invoice.GetPaymentPrompt(pmi).Details);
 
             var details = new ZcashLikePaymentData()
             {
@@ -294,7 +314,8 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 SubaddressIndex = subaddressIndex,
                 TransactionId = txId,
                 ConfirmationCount = confirmations,
-                BlockHeight = blockHeight
+                BlockHeight = blockHeight,
+                InvoiceSettledConfirmationThreshold = promptDetails.InvoiceSettledConfirmationThreshold
             };
             var status = GetStatus(details, invoice.SpeedPolicy) ? PaymentStatus.Settled : PaymentStatus.Processing;
             var paymentData = new Data.PaymentData()
@@ -327,16 +348,21 @@ namespace BTCPayServer.Plugins.ZCash.Services
         }
 
         private bool GetStatus(ZcashLikePaymentData details, SpeedPolicy speedPolicy)
-            => details.ConfirmationCount >= ConfirmationsRequired(speedPolicy);
-        public static int ConfirmationsRequired(SpeedPolicy speedPolicy)
-        => speedPolicy switch
         {
-            SpeedPolicy.HighSpeed => 0,
-            SpeedPolicy.MediumSpeed => 1,
-            SpeedPolicy.LowMediumSpeed => 2,
-            SpeedPolicy.LowSpeed => 6,
-            _ => 6,
-        };
+            // Console.WriteLine($"Confirmations: {details.ConfirmationCount}, Required: {ConfirmationsRequired(details, speedPolicy)}");
+            return details.ConfirmationCount >= ConfirmationsRequired(details, speedPolicy);
+        }
+
+        public static long ConfirmationsRequired(ZcashLikePaymentData details, SpeedPolicy speedPolicy)
+            => (details, speedPolicy) switch
+            {
+                ({ InvoiceSettledConfirmationThreshold: long v }, _) => v,
+                (_, SpeedPolicy.HighSpeed) => 0,
+                (_, SpeedPolicy.MediumSpeed) => 1,
+                (_, SpeedPolicy.LowMediumSpeed) => 2,
+                (_, SpeedPolicy.LowSpeed) => 6,
+                _ => 6,
+            };
 
         private async Task UpdateAnyPendingZcashLikePayment(string cryptoCode)
         {

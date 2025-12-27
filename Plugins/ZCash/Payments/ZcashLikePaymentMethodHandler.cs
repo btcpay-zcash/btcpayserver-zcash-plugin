@@ -38,21 +38,30 @@ namespace BTCPayServer.Plugins.ZCash.Payments
             Serializer = BlobSerializer.CreateSerializer().Serializer;
             _ZcashRpcProvider = ZcashRpcProvider;
         }
+        bool IsReady() => _ZcashRpcProvider.IsConfigured(_network.CryptoCode) && _ZcashRpcProvider.IsAvailable(_network.CryptoCode);
+
         public Task BeforeFetchingRates(PaymentMethodContext context)
         {
             context.Prompt.Currency = _network.CryptoCode;
             context.Prompt.Divisibility = _network.Divisibility;
-            if (context.Prompt.Activated)
+            if (context.Prompt.Activated && IsReady())
             {
                 var walletClient = _ZcashRpcProvider.WalletRpcClients[_network.CryptoCode];
                 var daemonClient = _ZcashRpcProvider.DaemonRpcClients[_network.CryptoCode];
                 var config = ParsePaymentMethodConfig(context.PaymentMethodConfig);
-                context.State = new Prepare()
+                try
                 {
-                    GetFeeRate = daemonClient.SendCommandAsync<GetFeeEstimateRequest, GetFeeEstimateResponse>("get_fee_estimate", new GetFeeEstimateRequest()),
-                    ReserveAddress = s => walletClient.SendCommandAsync<CreateAddressRequest, CreateAddressResponse>("create_address", new CreateAddressRequest() { Label = $"btcpay invoice #{s}", AccountIndex = config.AccountIndex }),
-                    AccountIndex = config.AccountIndex
-                };
+                    context.State = new Prepare()
+                    {
+                        GetFeeRate = daemonClient.SendCommandAsync<GetFeeEstimateRequest, GetFeeEstimateResponse>("get_fee_estimate", new GetFeeEstimateRequest()),
+                        ReserveAddress = s => walletClient.SendCommandAsync<CreateAddressRequest, CreateAddressResponse>("create_address", new CreateAddressRequest() { Label = $"btcpay invoice #{s}", AccountIndex = config.AccountIndex }),
+                        AccountIndex = config.AccountIndex
+                    };
+                }
+                catch (Exception ex)
+                {
+                    context.Logs.Write($"Error in BeforeFetchingRates: {ex.Message}", InvoiceEventData.EventSeverity.Error);
+                }
             }
             return Task.CompletedTask;
         }
@@ -73,7 +82,8 @@ namespace BTCPayServer.Plugins.ZCash.Payments
             {
                 AccountIndex = ZcashPrepare.AccountIndex,
                 AddressIndex = address.AddressIndex,
-                DepositAddress = address.Address
+                DepositAddress = address.Address,
+                InvoiceSettledConfirmationThreshold = ParsePaymentMethodConfig(context.PaymentMethodConfig).InvoiceSettledConfirmationThreshold
             }, Serializer);
             context.TrackedDestinations.Add(address.Address);
         }

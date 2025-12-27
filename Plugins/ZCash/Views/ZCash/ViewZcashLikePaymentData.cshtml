@@ -22,7 +22,7 @@
         m.DepositAddress = payment.Destination;
         m.Amount = payment.Value.ToString(CultureInfo.InvariantCulture);
 
-		var confReq = ZcashListener.ConfirmationsRequired(payment.InvoiceEntity.SpeedPolicy);
+		var confReq = ZcashListener.ConfirmationsRequired(onChainPaymentData, payment.InvoiceEntity.SpeedPolicy);
 		var confCount = onChainPaymentData.ConfirmationCount;
 		confCount = Math.Min(confReq, confCount);
 		m.Confirmations = $"{confCount} / {confReq}";

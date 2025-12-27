@@ -6,5 +6,6 @@ namespace BTCPayServer.Plugins.ZCash.Payments
     public class ZcashPaymentMethodConfig
     {
         public long AccountIndex { get; set; }
+        public long? InvoiceSettledConfirmationThreshold { get; set; }
     }
 }

@@ -73,7 +73,13 @@
                     }
                     else
                     {
-                        <span text-translate="true">No accounts available on the current wallet</span>
+                        @if (@Model.AccountIndex == null)
+                        {
+                            <span text-translate="true">No accounts available on the current wallet</span>
+                        }
+                        else {
+                            <span text-translate="false">@Model.AccountIndex</span>
+                        }
                         <input type="hidden" asp-for="AccountIndex"/>
                     }
                 </div>

@@ -7,5 +7,6 @@ namespace BTCPayServer.Plugins.ZCash.Payments
         public long AccountIndex { get; set; }
         public long AddressIndex { get; set; }
         public string DepositAddress { get; set; }
+        public long? InvoiceSettledConfirmationThreshold { get; set; }
     }
 }
