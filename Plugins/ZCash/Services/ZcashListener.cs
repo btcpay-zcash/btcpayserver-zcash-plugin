@@ -22,7 +22,6 @@ using NBitcoin;
 using NBitpayClient;
 using NBXplorer;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using static BTCPayServer.Client.Models.InvoicePaymentMethodDataModel;
 using BTCPayServer.Services;
 using BTCPayServer.Plugins.ZCash.RPC;

@@ -4,6 +4,7 @@ using System.Collections.Immutable;
 using System.Globalization;
 using System.Net.Http;
 using System.Threading.Tasks;
+using BBTCPayServer.Plugins.ZCash.RPC;
 using BTCPayServer.Plugins.ZCash.Configuration;
 using BTCPayServer.Plugins.ZCash.RPC;
 using NBitcoin;
@@ -42,14 +43,22 @@ namespace BTCPayServer.Plugins.ZCash.Services
             return _summaries.ContainsKey(cryptoCode) && IsAvailable(_summaries[cryptoCode]);
         }
 
-        private bool IsAvailable(ZcashLikeSummary summary)
+        private static bool IsAvailable(ZcashLikeSummary summary)
         {
             return summary.Synced &&
                    summary.WalletAvailable;
         }
 
+        internal static bool WalletCheckpointAdvanced(ZcashLikeSummary previousSummary, ZcashLikeSummary summary)
+        {
+            return IsAvailable(previousSummary) &&
+                   IsAvailable(summary) &&
+                   summary.WalletHeight > previousSummary.WalletHeight;
+        }
+
         public async Task<ZcashLikeSummary> UpdateSummary(string cryptoCode)
         {
+            var normalizedCryptoCode = cryptoCode.ToUpperInvariant();
             if (!DaemonRpcClients.TryGetValue(cryptoCode.ToUpperInvariant(), out var daemonRpcClient) ||
                 !WalletRpcClients.TryGetValue(cryptoCode.ToUpperInvariant(), out var walletRpcClient))
             {
@@ -90,12 +99,21 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 summary.WalletAvailable = false;
             }
 
-            var changed = !_summaries.ContainsKey(cryptoCode) || IsAvailable(cryptoCode) != IsAvailable(summary);
+            var hadPreviousSummary = _summaries.TryGetValue(normalizedCryptoCode, out var previousSummary);
+            var changed = !hadPreviousSummary || IsAvailable(previousSummary) != IsAvailable(summary);
 
-            _summaries.AddOrReplace(cryptoCode, summary);
+            _summaries.AddOrReplace(normalizedCryptoCode, summary);
             if (changed)
             {
-                _eventAggregator.Publish(new ZcashDaemonStateChange() { Summary = summary, CryptoCode = cryptoCode });
+                _eventAggregator.Publish(new ZcashDaemonStateChange() { Summary = summary, CryptoCode = normalizedCryptoCode });
+            }
+            if (hadPreviousSummary && WalletCheckpointAdvanced(previousSummary, summary))
+            {
+                _eventAggregator.Publish(new ZcashEvent()
+                {
+                    BlockHash = summary.WalletHeight.ToString(CultureInfo.InvariantCulture),
+                    CryptoCode = normalizedCryptoCode
+                });
             }
 
             return summary;

@@ -54,6 +54,16 @@ cd bin/Release/net8.0/publish/
 zip BTCPayServer.Plugins.ZCash.btcpay BTCPayServer.Plugins.ZCash.pdb BTCPayServer.Plugins.ZCash.dll BTCPayServer.Plugins.ZCash.deps.json
 ```
 
+### Running the Plugin Tests
+
+The plugin tests are kept separate from the BTCPay Server solution because the
+plugin and BTCPay web projects share intermediate build paths. Run them with a
+single MSBuild node:
+
+```sh
+dotnet test Plugins/ZCash.Tests/BTCPayServer.Plugins.ZCash.Tests.csproj -c Release -m:1
+```
+
 ## Contribution
 
 You will need to create this file:
