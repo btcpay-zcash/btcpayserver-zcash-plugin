@@ -27,7 +27,7 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
 
     public override IBTCPayServerPlugin.PluginDependency[] Dependencies { get; } =
     {
-        new IBTCPayServerPlugin.PluginDependency { Identifier = nameof(BTCPayServer), Condition = ">=2.1.0" }
+        new IBTCPayServerPlugin.PluginDependency { Identifier = nameof(BTCPayServer), Condition = ">=2.3.7" }
     };
 
     // Change this if you want another zcash coin
@@ -74,7 +74,8 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<ICheckoutModelExtension>(provider =>
 (ICheckoutModelExtension)ActivatorUtilities.CreateInstance(provider, typeof(ZcashCheckoutModelExtension), new object[] { network, pmi }));
 
-        services.AddUIExtension("store-nav", "/Views/ZCash/StoreNavZcashExtension.cshtml");
+        // services.AddUIExtension("store-nav", "/Views/ZCash/StoreNavZcashExtension.cshtml");
+        services.AddUIExtension("store-wallets-nav", "/Views/ZCash/StoreWalletsNavZcashExtension.cshtml");
         services.AddUIExtension("store-invoices-payments", "/Views/ZCash/ViewZcashLikePaymentData.cshtml");
         services.AddSingleton<ISyncSummaryProvider, ZcashSyncSummaryProvider>();
 

@@ -27,7 +27,7 @@
             </div>
         }
 
-        @if (!Model.WalletFileFound || Model.Summary.WalletHeight == default)
+        @if (!Model.WalletFileFound || Model.Summary?.WalletHeight == default)
         {
             <form method="post" asp-action="GetStoreZcashLikePaymentMethod" 
                   asp-route-storeId="@Context.GetRouteValue("storeId")"
@@ -83,12 +83,32 @@
                         <input type="hidden" asp-for="AccountIndex"/>
                     }
                 </div>
-                @* <div class="form-group">
+                <div class="form-group">
                     <div class="input-group my-3">
                         <input type="text" class="form-control" placeholder="@StringLocalizer["New account label"]" asp-for="NewAccountLabel">
                         <button name="command" value="add-account" class="input-group-text btn btn-secondary" type="submit" text-translate="true">Add account</button>
                     </div>
-                </div> *@
+                    <div class="card my-2">
+                        <h3 class="card-title p-2" text-translate="true">Create Wallet</h3>
+                        <div class="form-group p-2">
+                            <label asp-for="BirthHeight" class="form-label"></label>
+                            <input class="form-control" asp-for="BirthHeight">
+                            <span asp-validation-for="BirthHeight" class="text-danger"></span>
+                        </div>
+                        <div class="form-group p-2">
+                            <label asp-for="WalletPassword" class="form-label"></label>
+                            <input class="form-control" asp-for="WalletPassword">
+                            <span asp-validation-for="WalletPassword" class="text-danger"></span>
+                        </div>
+                        <div class="form-group p-2">
+                            <input type="text" class="form-control" placeholder="@StringLocalizer["New account label"]" asp-for="NewAccountLabel">
+                        </div>
+                        <div class="card-footer text-right">
+                            <button name="command" value="add-account" class="input-group-text btn btn-secondary" type="submit" text-translate="true">Add account</button>
+                            @* <button name="command" value="upload-wallet" class="btn btn-secondary" type="submit" text-translate="true">Create</button> *@
+                        </div>
+                    </div>
+                </div>
             }
 
             <div class="form-group">

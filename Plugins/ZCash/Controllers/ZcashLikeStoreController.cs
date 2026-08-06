@@ -73,8 +73,26 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             return new ZcashLikePaymentMethodListViewModel()
             {
                 Items = _ZcashLikeConfiguration.ZcashLikeConfigurationItems.Select(pair =>
-                    GetZcashLikePaymentMethodViewModel(StoreData, pair.Key, excludeFilters,
-                        accountsList[pair.Key].Result))
+                    GetZcashLikePaymentMethodViewModel(StoreData, pair.Key, excludeFilters))
+            };
+        }
+
+        [NonAction]
+        public ZcashLikePaymentMethodListViewModel GetNavVM(StoreData storeData)
+        {
+            var excludeFilters = storeData.GetStoreBlob().GetExcludedPaymentMethods();
+
+            return new ZcashLikePaymentMethodListViewModel
+            {
+                Items = _ZcashLikeConfiguration.ZcashLikeConfigurationItems.Select(pair =>
+                {
+                    var paymentMethodId = PaymentTypes.CHAIN.GetPaymentMethodId(pair.Key);
+                    return new ZcashLikePaymentMethodViewModel
+                    {
+                        CryptoCode = pair.Key,
+                        Enabled = !excludeFilters.Match(paymentMethodId)
+                    };
+                })
             };
         }
 
@@ -93,44 +111,18 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
         }
 
         private ZcashLikePaymentMethodViewModel GetZcashLikePaymentMethodViewModel(
-            StoreData storeData, string cryptoCode,
-            IPaymentFilter excludeFilters, GetAccountsResponse accountsResponse)
+            StoreData storeData, string cryptoCode, IPaymentFilter excludeFilters)
         {
-            var Zcash = storeData.GetPaymentMethodConfigs(_handlers)
-                .Where(s => s.Key is ZcashPaymentMethodConfig)
-                .Select(s => (PaymentMethodId: s.Key, Details: (ZcashPaymentPromptDetails)s.Value));
-            var _config = (ZcashPaymentMethodConfig)storeData.GetPaymentMethodConfigs(_handlers).FirstOrDefault().Value;
             var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
-            var settings = Zcash.Where(method => method.PaymentMethodId == pmi).Select(m => m.Details).SingleOrDefault();
+            var config = storeData.GetPaymentMethodConfig<ZcashPaymentMethodConfig>(pmi, _handlers);
+
             _ZcashRpcProvider.Summaries.TryGetValue(cryptoCode, out var summary);
-            _ZcashLikeConfiguration.ZcashLikeConfigurationItems.TryGetValue(cryptoCode,
-                out var configurationItem);
-            var fileAddress = Path.Combine(configurationItem.WalletDirectory, "wallet");
-            var accounts = accountsResponse?.SubaddressAccounts?.Select(account =>
-                new SelectListItem(
-                    $"{account.AccountIndex} - {(string.IsNullOrEmpty(account.Label) ? "No label" : account.Label)}",
-                    account.AccountIndex.ToString(CultureInfo.InvariantCulture)));
+            _ZcashLikeConfiguration.ZcashLikeConfigurationItems
+                .TryGetValue(cryptoCode, out var configurationItem);
 
-            var configFile = configurationItem.ConfigFile;
-
-            JsonObject json;
-            if (System.IO.File.Exists(configFile))
-            {
-                using (var fs = new FileStream(configFile, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
-                using (var reader = new StreamReader(fs))
-                {
-                    var jsonText = reader.ReadToEnd();
-                    json = JsonNode.Parse(jsonText)?.AsObject() ?? new JsonObject();
-                }
-            }
-            else
-            {
-                json = new JsonObject();
-            }
-
-            bool hasValidConfirmations = false;
             var settlementThresholdChoice = ZcashLikeSettlementThresholdChoice.StoreSpeedPolicy;
-            if (_config != null && _config.InvoiceSettledConfirmationThreshold is { } confirmations)
+            bool hasValidConfirmations = false;
+            if (config?.InvoiceSettledConfirmationThreshold is { } confirmations)
             {
                 hasValidConfirmations = true;
                 settlementThresholdChoice = confirmations switch
@@ -141,83 +133,27 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                     _ => ZcashLikeSettlementThresholdChoice.Custom
                 };
             }
-            // long confirmations = 0;
-            // bool hasValidConfirmations = false;
-            // if (json?["confirmations"] is JsonValue valueNode &&
-            //     long.TryParse(valueNode.ToString(), out confirmations))
-            // {
-            //     hasValidConfirmations = true;
-            //     settlementThresholdChoice = confirmations switch
-            //     {
-            //         0 => ZcashLikeSettlementThresholdChoice.ZeroConfirmation,
-            //         1 => ZcashLikeSettlementThresholdChoice.AtLeastOne,
-            //         6 => ZcashLikeSettlementThresholdChoice.AtLeastSix,
-            //         _ => ZcashLikeSettlementThresholdChoice.Custom
-            //     };
-            // }
 
-            if (settings != null)
+            return new ZcashLikePaymentMethodViewModel
             {
-                Console.WriteLine($"settings: {settings}");
-            }
-            else
-            {
-                Console.WriteLine("settings is null.");
-
-                try
-                {
-                    Console.WriteLine($"Zcash: {Zcash.Where(method => method.PaymentMethodId == pmi)}");
-
-                    Console.WriteLine(Zcash.Count());
-                    Console.WriteLine(Zcash.ToList().Count());
-                    Console.WriteLine("pmi: " + pmi);
-                    var nullPaymentMethods = Zcash.Where(method => method.PaymentMethodId == null).ToList();
-                    Console.WriteLine("Items with null PaymentMethodId: " + nullPaymentMethods.Count());
-
-                    // var settings2 = Zcash.Where(method => method.PaymentMethodId == pmi).FirstOrDefault();
-                    // if (settings2 != null)
-                    // {
-                    //     Console.WriteLine($"settings2.Value: {settings2.Value}");
-                    // }
-
-                    var allConfigs = storeData.GetPaymentMethodConfigs(_handlers);
-                    Console.WriteLine($"Total configs: {allConfigs.Count()}");
-                    Console.WriteLine($"_config.InvoiceSettledConfirmationThreshold: {_config.InvoiceSettledConfirmationThreshold}");
-                    Console.WriteLine($"_config.AccountIndex: {_config.AccountIndex}");
-
-                    var _config2 = storeData.GetPaymentMethodConfigs(_handlers).FirstOrDefault();
-                    if (_config2.Value != null)
-                    {
-                        Console.WriteLine($"Config type: {_config2.Value.GetType()}");
-                        Console.WriteLine("Config properties:");
-                        foreach (var prop in _config2.Value.GetType().GetProperties())
-                        {
-                            Console.WriteLine($"{prop.Name}: {prop.GetValue(_config2.Value)}");
-                        }
-                    }
-                }
-                catch (Exception) { }
-            }
-
-            return new ZcashLikePaymentMethodViewModel()
-            {
-                WalletFileFound = System.IO.File.Exists(configFile),
-                Enabled =
-                    // settings != null &&
-                    !excludeFilters.Match(PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode)),
+                WalletFileFound = System.IO.File.Exists(configurationItem?.ConfigFile),
+                Enabled = config?.AccountIndex is not null && !excludeFilters.Match(pmi),
                 Summary = summary,
                 CryptoCode = cryptoCode,
-                AccountIndex = _config?.AccountIndex ?? accountsResponse?.SubaddressAccounts?.FirstOrDefault()?.AccountIndex ?? 0,
-                Accounts = accounts == null ? null : new SelectList(accounts, nameof(SelectListItem.Value),
-                    nameof(SelectListItem.Text)),
+                AccountIndex = config?.AccountIndex,
                 SettlementConfirmationThresholdChoice = settlementThresholdChoice,
                 CustomSettlementConfirmationThreshold =
-                    _config != null &&
                     hasValidConfirmations &&
                     settlementThresholdChoice is ZcashLikeSettlementThresholdChoice.Custom
-                        ? _config.InvoiceSettledConfirmationThreshold
+                        ? config.InvoiceSettledConfirmationThreshold
                         : null
             };
+        }
+
+        [HttpGet("~/stores/{storeId}/onchain/{cryptoCode}")]
+        public IActionResult OnchainRedirect(string storeId, string cryptoCode)
+        {
+            return RedirectToAction(nameof(GetStoreZcashLikePaymentMethod), new { storeId, cryptoCode });
         }
 
         [HttpGet("{cryptoCode}")]
@@ -230,7 +166,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             }
 
             var vm = GetZcashLikePaymentMethodViewModel(StoreData, cryptoCode,
-                StoreData.GetStoreBlob().GetExcludedPaymentMethods(), await GetAccounts(cryptoCode));
+                StoreData.GetStoreBlob().GetExcludedPaymentMethods());
             return View("/Views/Zcash/GetStoreZcashLikePaymentMethod.cshtml", vm);
         }
 
@@ -239,6 +175,10 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
         public async Task<IActionResult> GetStoreZcashLikePaymentMethod(ZcashLikePaymentMethodViewModel viewModel, string command, string cryptoCode)
         {
             cryptoCode = cryptoCode.ToUpperInvariant();
+            var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
+            var store = StoreData;
+            var config = store.GetPaymentMethodConfig<ZcashPaymentMethodConfig>(pmi, _handlers)
+                 ?? new ZcashPaymentMethodConfig();
             if (!_ZcashLikeConfiguration.ZcashLikeConfigurationItems.TryGetValue(cryptoCode,
                 out var configurationItem))
             {
@@ -246,14 +186,52 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             }
 
             if (command == "add-account")
+                {
+                    if (config.AccountIndex is not null)
             {
+                TempData.SetStatusMessageModel(new StatusMessageModel
+                {
+                    Severity = StatusMessageModel.StatusSeverity.Error,
+                    Message = StringLocalizer["This store already has an account configured."].Value
+                });
+                return RedirectToAction(nameof(GetStoreZcashLikePaymentMethod),
+                    new { storeId = store.Id, cryptoCode });
+            }
+
+            if (string.IsNullOrWhiteSpace(viewModel.WalletPassword))
+                ModelState.AddModelError(nameof(viewModel.WalletPassword),
+                    StringLocalizer["A viewing key is required."]);
+
                 try
                 {
-                    var newAccount = await _ZcashRpcProvider.WalletRpcClients[cryptoCode].SendCommandAsync<CreateAccountRequest, CreateAccountResponse>("create_account", new CreateAccountRequest()
+                    var newAccount = await _ZcashRpcProvider.WalletRpcClients[cryptoCode]
+                .SendCommandAsync<CreateAccountRequest, CreateAccountResponse>(
+                    "create_account",
+                    new CreateAccountRequest
                     {
-                        Label = viewModel.NewAccountLabel
+                        Key = viewModel.WalletPassword,
+                        Height = viewModel.BirthHeight,
+                        Label = string.IsNullOrWhiteSpace(viewModel.NewAccountLabel)
+                            ? $"store:{StoreData.Id}"
+                            : viewModel.NewAccountLabel
                     });
-                    viewModel.AccountIndex = newAccount.AccountIndex;
+
+                    // Persist immediately so the account is never orphaned
+                    // var store = StoreData;
+                    store.SetPaymentMethodConfig(_handlers[pmi], new ZcashPaymentMethodConfig
+                    {
+                        AccountIndex = newAccount.AccountIndex
+                    });
+                    await _StoreRepository.UpdateStore(store);
+
+                    TempData.SetStatusMessageModel(new StatusMessageModel
+                    {
+                        Severity = StatusMessageModel.StatusSeverity.Success,
+                        Message = StringLocalizer["Account #{0} created for this store.",
+                            newAccount.AccountIndex].Value
+                    });
+                    return RedirectToAction(nameof(GetStoreZcashLikePaymentMethod),
+                        new { storeId = StoreData.Id, cryptoCode });
                 }
                 catch (Exception)
                 {
@@ -342,11 +320,18 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                 }
             }
 
+            if (viewModel.AccountIndex is null)
+            {
+                ModelState.AddModelError(nameof(viewModel.AccountIndex), 
+                    "An account must be created before enabling this payment method.");
+                
+            }
+
             if (!ModelState.IsValid)
             {
 
                 var vm = GetZcashLikePaymentMethodViewModel(StoreData, cryptoCode,
-                    StoreData.GetStoreBlob().GetExcludedPaymentMethods(), await GetAccounts(cryptoCode));
+                    StoreData.GetStoreBlob().GetExcludedPaymentMethods());
 
                 vm.Enabled = viewModel.Enabled;
                 vm.NewAccountLabel = viewModel.NewAccountLabel;
@@ -360,7 +345,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             var blob = storeData.GetStoreBlob();
             storeData.SetPaymentMethodConfig(_handlers[PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode)], new ZcashPaymentPromptDetails()
             {
-                AccountIndex = viewModel.AccountIndex,
+                AccountIndex = viewModel.AccountIndex!.Value,
                 InvoiceSettledConfirmationThreshold = viewModel.SettlementConfirmationThresholdChoice switch
                 {
                     ZcashLikeSettlementThresholdChoice.ZeroConfirmation => 0,
@@ -468,7 +453,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             public ZcashRPCProvider.ZcashLikeSummary Summary { get; set; }
             public string CryptoCode { get; set; }
             public string NewAccountLabel { get; set; }
-            public long AccountIndex { get; set; }
+            public long? AccountIndex { get; set; }
             public bool Enabled { get; set; }
 
             public IEnumerable<SelectListItem> Accounts { get; set; }
