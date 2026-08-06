@@ -74,7 +74,8 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<ICheckoutModelExtension>(provider =>
 (ICheckoutModelExtension)ActivatorUtilities.CreateInstance(provider, typeof(ZcashCheckoutModelExtension), new object[] { network, pmi }));
 
-        services.AddUIExtension("store-nav", "/Views/ZCash/StoreNavZcashExtension.cshtml");
+        // services.AddUIExtension("store-nav", "/Views/ZCash/StoreNavZcashExtension.cshtml");
+        services.AddUIExtension("store-wallets-nav", "/Views/ZCash/StoreWalletsNavZcashExtension.cshtml");
         services.AddUIExtension("store-invoices-payments", "/Views/ZCash/ViewZcashLikePaymentData.cshtml");
         services.AddSingleton<ISyncSummaryProvider, ZcashSyncSummaryProvider>();
 

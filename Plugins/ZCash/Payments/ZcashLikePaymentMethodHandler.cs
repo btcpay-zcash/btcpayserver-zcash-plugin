@@ -44,18 +44,19 @@ namespace BTCPayServer.Plugins.ZCash.Payments
         {
             context.Prompt.Currency = _network.CryptoCode;
             context.Prompt.Divisibility = _network.Divisibility;
-            if (context.Prompt.Activated && IsReady())
+            var config = ParsePaymentMethodConfig(context.PaymentMethodConfig);
+            if (context.Prompt.Activated && IsReady() && config.AccountIndex is { } accountIndex)
             {
                 var walletClient = _ZcashRpcProvider.WalletRpcClients[_network.CryptoCode];
                 var daemonClient = _ZcashRpcProvider.DaemonRpcClients[_network.CryptoCode];
-                var config = ParsePaymentMethodConfig(context.PaymentMethodConfig);
+                
                 try
                 {
                     context.State = new Prepare()
                     {
                         GetFeeRate = daemonClient.SendCommandAsync<GetFeeEstimateRequest, GetFeeEstimateResponse>("get_fee_estimate", new GetFeeEstimateRequest()),
-                        ReserveAddress = s => walletClient.SendCommandAsync<CreateAddressRequest, CreateAddressResponse>("create_address", new CreateAddressRequest() { Label = $"btcpay invoice #{s}", AccountIndex = config.AccountIndex }),
-                        AccountIndex = config.AccountIndex
+                        ReserveAddress = s => walletClient.SendCommandAsync<CreateAddressRequest, CreateAddressResponse>("create_address", new CreateAddressRequest() { Label = $"btcpay invoice #{s}", AccountIndex = accountIndex }),
+                        AccountIndex = accountIndex
                     };
                 }
                 catch (Exception ex)
