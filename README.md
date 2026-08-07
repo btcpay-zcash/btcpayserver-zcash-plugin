@@ -63,6 +63,7 @@ You will need to create this file:
 ```json
 {
   "DEBUG_PLUGINS": "/<absolute-path-to-repo>/btcpayserver-zcash-plugin/Plugins/ZCash/bin/Debug/net10.0/BTCPayServer.Plugins.ZCash.dll",
+  "ZEC_WALLET_BACKEND_TYPE": "ZcashWalletd",
   "ZEC_DAEMON_URI": "http://127.0.0.1:8001",
   "ZEC_WALLET_DAEMON_URI": "http://127.0.0.1:8001",
   "ZEC_WALLET_DAEMON_WALLETDIR": "/<absolute-path-to-repo>/btcpayserver-zcash-plugin/dev/wallet_datadir",
@@ -77,9 +78,13 @@ Configure this plugin using the following environment variables:
 
 | Environment variable | Description |
 | --- |-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+**BTCPAY_ZEC_WALLET_BACKEND_TYPE** | Optional. Selects the wallet backend. Supported values: `ZcashWalletd` (default) and `ZkoolGraphQl` |
 **BTCPAY_ZEC_DAEMON_URI** | **Required**. The URI of the deamon RPC interface |
 **BTCPAY_ZEC_WALLET_DAEMON_URI** | **Required**.  The URI of the wallet RPC interface | http://127.0.0.1:18082 |
 **BTCPAY_ZEC_WALLET_DAEMON_WALLETDIR** | **Required**. The directory of the wallet directory |
+**BTCPAY_ZEC_WALLET_GRAPHQL_URI** | Required when `BTCPAY_ZEC_WALLET_BACKEND_TYPE=ZkoolGraphQl`. The URI of the Zkool GraphQL wallet endpoint |
+
+When using the Zkool GraphQL wallet backend, `BTCPAY_ZEC_DAEMON_URI`, `BTCPAY_ZEC_WALLET_DAEMON_URI`, and `BTCPAY_ZEC_WALLET_DAEMON_WALLETDIR` are not required.
 
 ## For Maintainers
 

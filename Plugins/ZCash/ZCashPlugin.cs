@@ -64,6 +64,7 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             ConfigureZcashLikeConfiguration(provider));
         services.AddSingleton<ZcashRPCProvider>();
         services.AddHostedService<ZcashLikeSummaryUpdaterHostedService>();
+        services.AddHostedService<ZcashWalletEventHostedService>();
         services.AddHostedService<ZcashListener>();
 
 
@@ -91,28 +92,41 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
 
         foreach (var ZcashLikeSpecificBtcPayNetwork in supportedNetworks)
         {
+            var walletBackendType =
+                configuration.GetOrDefault<WalletBackendType?>(
+                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_backend_type", null) ??
+                WalletBackendType.ZcashWalletd;
             var daemonUri =
                 configuration.GetOrDefault<Uri?>($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_daemon_uri",
                     null);
             var walletDaemonUri =
                 configuration.GetOrDefault<Uri?>(
                     $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_uri", null);
+            var graphQlEndpointUri =
+                configuration.GetOrDefault<Uri?>(
+                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_graphql_uri", null);
             var walletDaemonWalletDirectory =
                 configuration.GetOrDefault<string?>(
                     $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_walletdir", null);
             var walletDaemonConfigFile =
                 configuration.GetOrDefault<string?>(
-                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_config_path", Path.Combine(walletDaemonWalletDirectory, "config.json"));
-            if (daemonUri == null || walletDaemonUri == null || walletDaemonWalletDirectory == null)
+                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_config_path",
+                    string.IsNullOrEmpty(walletDaemonWalletDirectory) ? null : Path.Combine(walletDaemonWalletDirectory, "config.json"));
+            if (walletBackendType == WalletBackendType.ZcashWalletd &&
+                (daemonUri == null || walletDaemonUri == null || walletDaemonWalletDirectory == null))
             {
                 throw new ConfigException($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode} is misconfigured");
             }
+            if (walletBackendType == WalletBackendType.ZkoolGraphQl && graphQlEndpointUri == null)
+            {
+                throw new ConfigException($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode} GraphQL wallet is misconfigured");
+            }
             // Temp patch
-            if (System.IO.File.Exists(Path.Combine(walletDaemonWalletDirectory, "zec-wallet2.db")) && walletDaemonConfigFile == Path.Combine(walletDaemonWalletDirectory, "config.json")) {
+            if (!string.IsNullOrEmpty(walletDaemonWalletDirectory) && System.IO.File.Exists(Path.Combine(walletDaemonWalletDirectory, "zec-wallet2.db")) && walletDaemonConfigFile == Path.Combine(walletDaemonWalletDirectory, "config.json")) {
                 walletDaemonConfigFile = Path.Combine(walletDaemonWalletDirectory, "config2.json");
             }
             // Temp patch
-            if (walletDaemonConfigFile == "/data/config2.json") {
+            if (walletDaemonConfigFile == "/data/config2.json" && !string.IsNullOrEmpty(walletDaemonWalletDirectory)) {
                 walletDaemonConfigFile = Path.Combine(walletDaemonWalletDirectory, "config2.json");
             }
 
@@ -120,8 +134,10 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             {
                 DaemonRpcUri = daemonUri,
                 InternalWalletRpcUri = walletDaemonUri,
+                GraphQlEndpointUri = graphQlEndpointUri,
                 WalletDirectory = walletDaemonWalletDirectory,
-                ConfigFile = walletDaemonConfigFile
+                ConfigFile = walletDaemonConfigFile,
+                WalletBackendType = walletBackendType
             });
         }
         return result;

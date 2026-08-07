@@ -13,7 +13,15 @@ namespace BTCPayServer.Plugins.ZCash.Configuration
     {
         public Uri DaemonRpcUri { get; set; }
         public Uri InternalWalletRpcUri { get; set; }
+        public Uri GraphQlEndpointUri { get; set; }
         public string WalletDirectory { get; set; }
         public string ConfigFile { get; set; }
+        public WalletBackendType WalletBackendType { get; set; } = WalletBackendType.ZcashWalletd;
+    }
+
+    public enum WalletBackendType
+    {
+        ZcashWalletd,
+        ZkoolGraphQl
     }
 }

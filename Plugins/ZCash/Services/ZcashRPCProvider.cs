@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Globalization;
+using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using BTCPayServer.Plugins.ZCash.Configuration;
@@ -16,6 +17,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
         private readonly EventAggregator _eventAggregator;
         public ImmutableDictionary<string, JsonRpcClient> DaemonRpcClients;
         public ImmutableDictionary<string, JsonRpcClient> WalletRpcClients;
+        public ImmutableDictionary<string, IZcashWalletBackend> WalletBackends;
 
         private readonly ConcurrentDictionary<string, ZcashLikeSummary> _summaries =
             new ConcurrentDictionary<string, ZcashLikeSummary>();
@@ -27,14 +29,30 @@ namespace BTCPayServer.Plugins.ZCash.Services
             _ZcashLikeConfiguration = ZcashLikeConfiguration;
             _eventAggregator = eventAggregator;
             DaemonRpcClients =
-                _ZcashLikeConfiguration.ZcashLikeConfigurationItems.ToImmutableDictionary(pair => pair.Key,
-                    pair => new JsonRpcClient(pair.Value.DaemonRpcUri, "", "", httpClientFactory.CreateClient()));
+                _ZcashLikeConfiguration.ZcashLikeConfigurationItems
+                    .Where(pair => pair.Value.WalletBackendType == WalletBackendType.ZcashWalletd && pair.Value.DaemonRpcUri is not null)
+                    .ToImmutableDictionary(pair => pair.Key,
+                        pair => new JsonRpcClient(pair.Value.DaemonRpcUri, "", "", httpClientFactory.CreateClient()));
             WalletRpcClients =
-                _ZcashLikeConfiguration.ZcashLikeConfigurationItems.ToImmutableDictionary(pair => pair.Key,
-                    pair => new JsonRpcClient(pair.Value.InternalWalletRpcUri, "", "", httpClientFactory.CreateClient()));
+                _ZcashLikeConfiguration.ZcashLikeConfigurationItems
+                    .Where(pair => pair.Value.WalletBackendType == WalletBackendType.ZcashWalletd && pair.Value.InternalWalletRpcUri is not null)
+                    .ToImmutableDictionary(pair => pair.Key,
+                        pair => new JsonRpcClient(pair.Value.InternalWalletRpcUri, "", "", httpClientFactory.CreateClient()));
+            WalletBackends =
+                _ZcashLikeConfiguration.ZcashLikeConfigurationItems.ToImmutableDictionary(pair => pair.Key, pair =>
+                {
+                    return pair.Value.WalletBackendType switch
+                    {
+                        WalletBackendType.ZkoolGraphQl => new ZkoolGraphQlBackend(pair.Key,
+                            new ZkoolGraphQlClient(pair.Value.GraphQlEndpointUri, httpClientFactory.CreateClient())),
+                        _ => new ZcashWalletdBackend(pair.Key,
+                            new JsonRpcClient(pair.Value.DaemonRpcUri, "", "", httpClientFactory.CreateClient()),
+                            new JsonRpcClient(pair.Value.InternalWalletRpcUri, "", "", httpClientFactory.CreateClient()))
+                    };
+                });
         }
 
-        public bool IsConfigured(string cryptoCode) => WalletRpcClients.ContainsKey(cryptoCode) && DaemonRpcClients.ContainsKey(cryptoCode);
+        public bool IsConfigured(string cryptoCode) => WalletBackends.ContainsKey(cryptoCode.ToUpperInvariant());
 
         public bool IsAvailable(string cryptoCode)
         {
@@ -50,8 +68,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
 
         public async Task<ZcashLikeSummary> UpdateSummary(string cryptoCode)
         {
-            if (!DaemonRpcClients.TryGetValue(cryptoCode.ToUpperInvariant(), out var daemonRpcClient) ||
-                !WalletRpcClients.TryGetValue(cryptoCode.ToUpperInvariant(), out var walletRpcClient))
+            if (!WalletBackends.TryGetValue(cryptoCode.ToUpperInvariant(), out var walletBackend))
             {
                 return null;
             }
@@ -59,35 +76,22 @@ namespace BTCPayServer.Plugins.ZCash.Services
             var summary = new ZcashLikeSummary();
             try
             {
-                var daemonResult =
-                    await daemonRpcClient.SendCommandAsync<JsonRpcClient.NoRequestModel, SyncInfoResponse>("sync_info",
-                        JsonRpcClient.NoRequestModel.Instance);
+                var walletStatus = await walletBackend.GetSyncStatusAsync();
 
-                summary.TargetHeight = daemonResult.TargetHeight.GetValueOrDefault(0);
-                summary.CurrentHeight = daemonResult.Height;
-                summary.TargetHeight = summary.TargetHeight == 0 ? summary.CurrentHeight : summary.TargetHeight;
-                summary.Synced = daemonResult.Height >= summary.TargetHeight && summary.CurrentHeight > 0;
+                summary.TargetHeight = walletStatus.TargetHeight;
+                summary.CurrentHeight = walletStatus.CurrentHeight;
+                summary.WalletHeight = walletStatus.WalletHeight;
+                summary.Synced = walletStatus.Synced;
                 summary.UpdatedAt = DateTime.Now;
-                summary.DaemonAvailable = true;
+                summary.DaemonAvailable = walletStatus.DaemonAvailable;
+                summary.WalletAvailable = walletStatus.WalletAvailable;
             }
             catch (Exception e)
             {
                 Console.WriteLine(e.Message);
                 summary.DaemonAvailable = false;
-            }
-
-            try
-            {
-                var walletResult =
-                    await walletRpcClient.SendCommandAsync<JsonRpcClient.NoRequestModel, GetHeightResponse>(
-                        "get_height", JsonRpcClient.NoRequestModel.Instance);
-
-                summary.WalletHeight = walletResult.Height;
-                summary.WalletAvailable = true;
-            }
-            catch
-            {
                 summary.WalletAvailable = false;
+                summary.UpdatedAt = DateTime.Now;
             }
 
             var changed = !_summaries.ContainsKey(cryptoCode) || IsAvailable(cryptoCode) != IsAvailable(summary);

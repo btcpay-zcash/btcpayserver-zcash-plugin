@@ -13,6 +13,7 @@ services:
 
   btcpayserver:
     environment:
+      BTCPAY_ZEC_WALLET_BACKEND_TYPE: ZcashWalletd
       BTCPAY_ZEC_DAEMON_URI: http://zcash_walletd:8000
       BTCPAY_ZEC_WALLET_DAEMON_URI: http://zcash_walletd:8000
       BTCPAY_ZEC_WALLET_DAEMON_WALLETDIR: /root/zec_wallet

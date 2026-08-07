@@ -20,14 +20,14 @@
             <div class="card">
                 <ul class="list-group list-group-flush">
                     <li class="list-group-item">Node available: @Model.Summary.DaemonAvailable</li>
-                    <li class="list-group-item">Wallet available: @Model.Summary.WalletAvailable (@(Model.WalletFileFound ? "Wallet file present" : "Wallet file not found"))</li>
+                    <li class="list-group-item">Wallet available: @Model.Summary.WalletAvailable (@(Model.UsesWalletFile ? (Model.WalletFileFound ? "Wallet file present" : "Wallet file not found") : "Wallet file not required"))</li>
                     <li class="list-group-item">Last updated: @Model.Summary.UpdatedAt</li>
                     <li class="list-group-item">Synced: @Model.Summary.Synced (@Model.Summary.CurrentHeight / @Model.Summary.TargetHeight)</li>
                 </ul>
             </div>
         }
 
-        @if (!Model.WalletFileFound || Model.Summary?.WalletHeight == default)
+        @if (Model.UsesWalletFile && (!Model.WalletFileFound || Model.Summary?.WalletHeight == default))
         {
             <form method="post" asp-action="GetStoreZcashLikePaymentMethod" 
                   asp-route-storeId="@Context.GetRouteValue("storeId")"
@@ -58,7 +58,7 @@
               class="mt-4" enctype="multipart/form-data">
 
             <input type="hidden" asp-for="CryptoCode"/>
-            @if (!Model.WalletFileFound || Model.Summary.WalletHeight == default)
+            @if (Model.UsesWalletFile && (!Model.WalletFileFound || Model.Summary?.WalletHeight == default))
             {
                 <input type="hidden" asp-for="AccountIndex"/>
             }

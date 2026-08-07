@@ -120,22 +120,14 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 new InvoiceEvent(invoice, InvoiceEvent.ReceivedPayment) { Payment = payment });
         }
 
-        private async Task<GetTransfersResponse?> SafeGetTransfers(
-            JsonRpcClient client,
+        private async Task<IReadOnlyList<WalletTransfer>> SafeGetTransfers(
+            IZcashWalletBackend walletBackend,
             long accountIndex,
             List<long> subaddrIndices)
         {
             try
             {
-                return await client.SendCommandAsync<GetTransfersRequest, GetTransfersResponse>(
-                    "get_transfers",
-                    new GetTransfersRequest
-                    {
-                        AccountIndex = accountIndex,
-                        In = true,
-                        SubaddrIndices = subaddrIndices.Distinct().ToList()
-                    }
-                );
+                return await walletBackend.GetTransfersAsync(accountIndex, subaddrIndices.Distinct().ToList());
             }
             catch (Exception ex)
             {
@@ -149,7 +141,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             if (!invoices.Any())
                 return;
 
-            var ZcashWalletRpcClient = _ZcashRpcProvider.WalletRpcClients[cryptoCode];
+            var walletBackend = _ZcashRpcProvider.WalletBackends[cryptoCode];
             var network = _networkProvider.GetNetwork(cryptoCode);
 
             var paymentId = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
@@ -195,7 +187,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             // Send RPC commands
             var tasks = accountToAddressQuery.ToDictionary(
                 kvp => kvp.Key,
-                kvp => SafeGetTransfers(ZcashWalletRpcClient, kvp.Key, kvp.Value)
+                kvp => SafeGetTransfers(walletBackend, kvp.Key, kvp.Value)
             );
 
             await Task.WhenAll(tasks.Values);
@@ -209,14 +201,14 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 var response = await kvp.Value;
                 if (response == null)
                     continue;
-                Console.WriteLine($"Account {kvp.Key}: got {response.In?.Count ?? -1} incoming transfers");
-                var transfers = response.In;
+                Console.WriteLine($"Account {kvp.Key}: got {response?.Count ?? -1} incoming transfers");
+                var transfers = response;
                 if (transfers == null || !transfers.Any())
                     continue;
 
                 foreach (var transfer in transfers)
                 {
-                    Console.WriteLine($"Processing transfer {transfer.Txid} -> {transfer.Address}, amount: {transfer.Amount}");
+                    Console.WriteLine($"Processing transfer {transfer.TransactionId} -> {transfer.Address}, amount: {transfer.Amount}");
 
                     // Try to find existing invoice for this transfer
                     var invoice = await _invoiceRepository.GetInvoiceFromAddress(paymentId, transfer.Address);
@@ -241,16 +233,16 @@ namespace BTCPayServer.Plugins.ZCash.Services
                     //     Console.WriteLine($"New invoice found: {invoice.Id}");
                     // }
 
-                    Console.WriteLine($"HandlePaymentData {transfer.Address}, {transfer.Amount}, {transfer.SubaddrIndex.Major}, {transfer.Txid}, ${transfer.Confirmations}, ${transfer.Height}, ${invoice.Id}");
+                    Console.WriteLine($"HandlePaymentData {transfer.Address}, {transfer.Amount}, {transfer.AccountIndex}, {transfer.TransactionId}, ${transfer.Confirmations}, ${transfer.Height}, ${invoice.Id}");
 
                     // Handle payment data
                     await HandlePaymentData(
                         cryptoCode,
                         transfer.Address,
                         transfer.Amount,
-                        transfer.SubaddrIndex.Major,
-                        transfer.SubaddrIndex.Minor,
-                        transfer.Txid,
+                        transfer.AccountIndex,
+                        transfer.AddressIndex,
+                        transfer.TransactionId,
                         transfer.Confirmations,
                         transfer.Height,
                         invoice,
@@ -280,10 +272,8 @@ namespace BTCPayServer.Plugins.ZCash.Services
         private async Task OnTransactionUpdated(string cryptoCode, string transactionHash, long accountIndex)
         {
             var paymentMethodId = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
-            var transfer = await _ZcashRpcProvider.WalletRpcClients[cryptoCode]
-                .SendCommandAsync<GetTransferByTransactionIdRequest, GetTransferByTransactionIdResponse>(
-                    "get_transfer_by_txid",
-                    new GetTransferByTransactionIdRequest() { TransactionId = transactionHash, AccountIndex = accountIndex });
+            var transfer = await _ZcashRpcProvider.WalletBackends[cryptoCode]
+                .GetTransactionAsync(accountIndex, transactionHash);
 
             var paymentsToUpdate = new List<(PaymentEntity Payment, InvoiceEntity invoice)>();
 
@@ -295,16 +285,16 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 if (invoice == null)
                     continue;
 
-                var index = destination.First().SubaddrIndex;
+                var index = destination.First();
 
                 await HandlePaymentData(cryptoCode,
                     destination.Key,
                     destination.Sum(destination1 => destination1.Amount),
-                    index.Major,
-                    index.Minor,
-                    transfer.Transfer.Txid,
-                    transfer.Transfer.Confirmations,
-                    transfer.Transfer.Height
+                    index.AccountIndex,
+                    index.AddressIndex,
+                    transfer.TransactionId,
+                    transfer.Confirmations,
+                    transfer.Height
                     , invoice, paymentsToUpdate);
             }
 
