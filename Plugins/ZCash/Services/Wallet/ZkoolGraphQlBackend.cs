@@ -327,12 +327,6 @@ query($idAccount: Int!) {
                     }
                 }
 
-                if (_knownUnconfirmedByAccount.Count == 0)
-                {
-                    _knownUnconfirmedByAccount = nextKnown;
-                    return events;
-                }
-
                 _knownUnconfirmedByAccount = nextKnown;
                 return events;
             }
@@ -425,6 +419,8 @@ mutation($idAccount: Int!) {
                 TransparentAddress = token["transparent"]?.Value<string>(),
                 SaplingAddress = token["sapling"]?.Value<string>(),
                 OrchardAddress = token["orchard"]?.Value<string>(),
+                // Payment prompts currently store the next address index using the walletd convention,
+                // and the listener compensates with `AddressIndex - 1` when querying incoming transfers.
                 AddressIndex = ToLong(token["diversifierIndex"]) + 1,
                 Address = SelectPreferredAddress(token)
             };
