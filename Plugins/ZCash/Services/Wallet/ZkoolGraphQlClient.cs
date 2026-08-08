@@ -2,71 +2,63 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using GraphQL;
+using GraphQL.Client.Http;
+using GraphQL.Client.Serializer.Newtonsoft;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Newtonsoft.Json.Serialization;
 
 namespace BTCPayServer.Plugins.ZCash.Services
 {
-    public class ZkoolGraphQlClient
+    public class ZkoolGraphQlClient : IDisposable
     {
-        private readonly Uri _address;
-        private readonly HttpClient _httpClient;
+        private readonly GraphQLHttpClient _client;
 
-        public ZkoolGraphQlClient(Uri address, HttpClient httpClient)
+        public ZkoolGraphQlClient(Uri httpEndpoint, HttpClient httpClient)
         {
-            _address = address;
-            _httpClient = httpClient ?? new HttpClient();
+            var wsEndpoint = new UriBuilder(httpEndpoint)
+            {
+                Scheme = httpEndpoint.Scheme == "https" ? "wss" : "ws"
+            }.Uri;
+
+            var options = new GraphQLHttpClientOptions
+            {
+                EndPoint = httpEndpoint,
+                WebSocketEndPoint = wsEndpoint,
+                WebSocketProtocol = "graphql-transport-ws"
+            };
+
+            var serializer = new NewtonsoftJsonSerializer(new JsonSerializerSettings
+            {
+                ContractResolver = new CamelCasePropertyNamesContractResolver(),
+                NullValueHandling = NullValueHandling.Ignore
+            });
+
+            _client = new GraphQLHttpClient(options, serializer, httpClient);
         }
 
         public async Task<JObject> SendAsync(string query, object variables = null, CancellationToken cancellationToken = default)
         {
-            var serializerSettings = new JsonSerializerSettings
-            {
-                ContractResolver = new CamelCasePropertyNamesContractResolver(),
-                NullValueHandling = NullValueHandling.Ignore
-            };
+            var request = new GraphQLRequest { Query = query, Variables = variables };
+            var response = await _client.SendQueryAsync<JObject>(request, cancellationToken);
 
-            var request = new HttpRequestMessage(HttpMethod.Post, _address)
-            {
-                Content = new StringContent(
-                    JsonConvert.SerializeObject(new { query, variables }, serializerSettings),
-                    Encoding.UTF8,
-                    "application/json")
-            };
+            if (response.Errors?.Any() is true)
+                throw new GraphQlApiException(response.Errors.Select(e => e.Message));
 
-            var response = await _httpClient.SendAsync(request, cancellationToken);
-            var rawBody = await response.Content.ReadAsStringAsync(cancellationToken);
-            response.EnsureSuccessStatusCode();
-
-            var graphQlResponse = JsonConvert.DeserializeObject<GraphQlResponse>(rawBody);
-            if (graphQlResponse?.Errors?.Any() is true)
-            {
-                throw new GraphQlApiException(graphQlResponse.Errors.Select(error => error.Message));
-            }
-
-            return graphQlResponse?.Data ?? new JObject();
+            return response.Data ?? new JObject();
         }
 
-        internal class GraphQlResponse
-        {
-            [JsonProperty("data")] public JObject Data { get; set; }
-            [JsonProperty("errors")] public List<GraphQlError> Errors { get; set; }
-        }
+        public IObservable<GraphQLResponse<JObject>> CreateSubscriptionStream(GraphQLRequest request, Action<Exception> webSocketExceptionHandler)
+            => _client.CreateSubscriptionStream<JObject>(request, webSocketExceptionHandler);
 
-        internal class GraphQlError
-        {
-            [JsonProperty("message")] public string Message { get; set; }
-        }
+        public void Dispose() => _client.Dispose();
 
         public class GraphQlApiException : Exception
         {
-            public GraphQlApiException(IEnumerable<string> messages) : base(string.Join("; ", messages))
-            {
-            }
+            public GraphQlApiException(IEnumerable<string> messages) : base(string.Join("; ", messages)) { }
         }
     }
 }

@@ -41,7 +41,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             WalletBackends =
                 _ZcashLikeConfiguration.ZcashLikeConfigurationItems.ToImmutableDictionary(pair => pair.Key, pair =>
                 {
-                    return pair.Value.WalletBackendType switch
+                    IZcashWalletBackend backend = pair.Value.WalletBackendType switch
                     {
                         WalletBackendType.ZkoolGraphQl => new ZkoolGraphQlBackend(pair.Key,
                             new ZkoolGraphQlClient(pair.Value.GraphQlEndpointUri, httpClientFactory.CreateClient())),
@@ -49,6 +49,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
                             new JsonRpcClient(pair.Value.DaemonRpcUri, "", "", httpClientFactory.CreateClient()),
                             new JsonRpcClient(pair.Value.InternalWalletRpcUri, "", "", httpClientFactory.CreateClient()))
                     };
+                    return backend;
                 });
         }
 

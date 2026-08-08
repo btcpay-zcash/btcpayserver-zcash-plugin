@@ -56,4 +56,9 @@
   <ItemGroup>
 	<EmbeddedResource Include="zcash.png" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="GraphQL.Client" Version="6.1.0" />
+    <PackageReference Include="GraphQL.Client.Abstractions.Websocket" Version="6.1.0" />
+    <PackageReference Include="GraphQL.Client.Serializer.Newtonsoft" Version="6.1.0" />
+  </ItemGroup>
 </Project>

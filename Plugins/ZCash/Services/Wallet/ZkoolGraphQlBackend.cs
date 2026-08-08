@@ -2,10 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reactive.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BBTCPayServer.Plugins.ZCash.RPC;
 using BTCPayServer.Plugins.ZCash.Configuration;
+using GraphQL;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json.Linq;
 
 namespace BTCPayServer.Plugins.ZCash.Services
@@ -552,6 +555,106 @@ mutation($idAccount: Int!) {
             public string Address { get; set; }
             public long Amount { get; set; }
             public long AddressIndex { get; set; }
+        }
+
+        /// <summary>
+        /// Starts a long-running GraphQL subscription loop for all accounts, publishing
+        /// <see cref="ZcashEvent"/>s to <paramref name="eventAggregator"/> as BLOCK/TX events arrive.
+        /// Reconnects with backoff on websocket errors. Completes when <paramref name="cancellationToken"/> is cancelled.
+        /// </summary>
+        public async Task StartSubscriptionLoopAsync(EventAggregator eventAggregator, ILogger logger, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var accounts = await GetAccountsAsync(cancellationToken);
+                var tasks = accounts.Select(async account =>
+                {
+                    var accountId = await ResolveGraphQlAccountIdAsync(account.AccountIndex, cancellationToken);
+                    await RunAccountSubscriptionAsync(accountId, account.AccountIndex, eventAggregator, logger, cancellationToken);
+                }).ToList();
+                await Task.WhenAll(tasks);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                logger?.LogError(ex, "[{CryptoCode}] Failed to start GraphQL event subscriptions", CryptoCode);
+            }
+        }
+
+        private async Task RunAccountSubscriptionAsync(long accountId, long accountIndex, EventAggregator eventAggregator, ILogger logger, CancellationToken cancellationToken)
+        {
+            int errorCount = 0;
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var request = new GraphQLRequest
+                {
+                    Query = @"subscription($idAccount: Int!) { events(idAccount: $idAccount) { type height txid } }",
+                    Variables = new { idAccount = (int)accountId }
+                };
+
+                var tcs = new TaskCompletionSource();
+                using var subscriptionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+                void WebSocketExceptionHandler(Exception ex)
+                {
+                    Interlocked.Increment(ref errorCount);
+                    subscriptionCts.Cancel();
+                }
+
+                IDisposable subscription = null;
+                try
+                {
+                    subscription = _graphQlClient.CreateSubscriptionStream(request, WebSocketExceptionHandler)
+                        .Subscribe(
+                            response =>
+                            {
+                                var evt = MapSubscriptionEvent(response, accountIndex);
+                                if (evt != null)
+                                    eventAggregator.Publish(evt);
+                            },
+                            _ =>
+                            {
+                                Interlocked.Increment(ref errorCount);
+                                tcs.TrySetResult();
+                            },
+                            () => tcs.TrySetResult()
+                        );
+
+                    using var reg = subscriptionCts.Token.Register(() => tcs.TrySetResult());
+                    await tcs.Task;
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    logger?.LogWarning(ex, "[{CryptoCode}] GraphQL subscription error for account {AccountIndex}", CryptoCode, accountIndex);
+                }
+                finally
+                {
+                    subscription?.Dispose();
+                }
+
+                if (cancellationToken.IsCancellationRequested) return;
+
+                var delay = TimeSpan.FromSeconds(Math.Min(30, Math.Max(1, errorCount) * 5));
+                try { await Task.Delay(delay, cancellationToken); }
+                catch (OperationCanceledException) { return; }
+            }
+        }
+
+        private ZcashEvent MapSubscriptionEvent(GraphQL.GraphQLResponse<JObject> response, long accountIndex)
+        {
+            var evt = response.Data?["events"];
+            if (evt == null) return null;
+
+            var type = evt["type"]?.Value<string>();
+            var height = evt["height"]?.Value<long>() ?? 0;
+            var txid = evt["txid"]?.Value<string>();
+
+            return type switch
+            {
+                "BLOCK" => new ZcashEvent { CryptoCode = CryptoCode, BlockHash = height.ToString(CultureInfo.InvariantCulture) },
+                "TX" when !string.IsNullOrEmpty(txid) => new ZcashEvent { CryptoCode = CryptoCode, AccountIndex = accountIndex, TransactionHash = txid },
+                _ => null
+            };
         }
     }
 }

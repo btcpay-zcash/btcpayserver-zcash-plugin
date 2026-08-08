@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using BTCPayServer.Logging;
 using BTCPayServer.Plugins.ZCash.Configuration;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using NBitcoin;
 
 namespace BTCPayServer.Plugins.ZCash.Services
@@ -40,6 +41,12 @@ namespace BTCPayServer.Plugins.ZCash.Services
 
         private async Task StartLoop(string cryptoCode, CancellationToken cancellationToken)
         {
+            if (_zcashRpcProvider.WalletBackends.TryGetValue(cryptoCode, out var backend)
+                && backend is ZkoolGraphQlBackend zkoolBackend)
+            {
+                _ = zkoolBackend.StartSubscriptionLoopAsync(_eventAggregator, _logs.PayServer, cancellationToken);
+            }
+
             try
             {
                 while (!cancellationToken.IsCancellationRequested)
