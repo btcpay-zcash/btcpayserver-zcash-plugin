@@ -598,6 +598,7 @@ mutation($idAccount: Int!) {
                 void WebSocketExceptionHandler(Exception ex)
                 {
                     Interlocked.Increment(ref errorCount);
+                    tcs.TrySetResult();
                     subscriptionCts.Cancel();
                 }
 
@@ -634,7 +635,7 @@ mutation($idAccount: Int!) {
 
                 if (cancellationToken.IsCancellationRequested) return;
 
-                var delay = TimeSpan.FromSeconds(Math.Min(30, Math.Max(1, errorCount) * 5));
+                var delay = TimeSpan.FromSeconds(Math.Min(30, Math.Max(1, Volatile.Read(ref errorCount)) * 5));
                 try { await Task.Delay(delay, cancellationToken); }
                 catch (OperationCanceledException) { return; }
             }

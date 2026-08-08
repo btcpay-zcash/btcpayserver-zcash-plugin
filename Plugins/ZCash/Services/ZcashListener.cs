@@ -208,7 +208,9 @@ namespace BTCPayServer.Plugins.ZCash.Services
                     // Try to find existing invoice for this transfer
                     var invoice = await _invoiceRepository.GetInvoiceFromAddress(paymentId, transfer.Address);
                     if (invoice == null)
+                    {
                         continue;
+                    }
 
                     // Handle payment data
                     await HandlePaymentData(
