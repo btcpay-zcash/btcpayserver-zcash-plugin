@@ -9,11 +9,16 @@ namespace BTCPayServer.Plugins.ZCash.Configuration
             new Dictionary<string, ZcashLikeConfigurationItem>();
     }
 
+    public enum WalletBackend { Walletd, ZkoolGraphQL }
+
     public class ZcashLikeConfigurationItem
     {
         public Uri DaemonRpcUri { get; set; }
         public Uri InternalWalletRpcUri { get; set; }
+        public Uri GraphQlEndpointUri { get; set; }
+        public Uri CashCowEndpointUri { get; set; }
         public string WalletDirectory { get; set; }
+        public WalletBackend WalletBackend { get; set; } = WalletBackend.Walletd;
         public string ConfigFile { get; set; }
     }
 }

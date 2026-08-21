@@ -14,6 +14,7 @@ using BTCPayServer.Plugins.Altcoins;
 using BTCPayServer.Plugins.ZCash.Configuration;
 using BTCPayServer.Plugins.ZCash.Payments;
 using BBTCPayServer.Plugins.ZCash.RPC;
+using BTCPayServer.Plugins.ZCash.Data;
 using BTCPayServer.Plugins.ZCash.Utils;
 using BTCPayServer.Services.Invoices;
 using Microsoft.Extensions.Hosting;
@@ -26,6 +27,7 @@ using Newtonsoft.Json.Linq;
 using static BTCPayServer.Client.Models.InvoicePaymentMethodDataModel;
 using BTCPayServer.Services;
 using BTCPayServer.Plugins.ZCash.RPC;
+using Microsoft.EntityFrameworkCore;
 
 namespace BTCPayServer.Plugins.ZCash.Services
 {
@@ -40,6 +42,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
         private readonly PaymentService _paymentService;
         private readonly InvoiceActivator _invoiceActivator;
         private readonly PaymentMethodHandlerDictionary _handlers;
+        private readonly IDbContextFactory<ZcashPluginDbContext> _dbContextFactory;
 
         public ZcashListener(InvoiceRepository invoiceRepository,
             EventAggregator eventAggregator,
@@ -49,7 +52,8 @@ namespace BTCPayServer.Plugins.ZCash.Services
             ILogger<ZcashListener> logger,
             PaymentService paymentService,
             InvoiceActivator invoiceActivator,
-            PaymentMethodHandlerDictionary handlers) : base(eventAggregator, logger)
+            PaymentMethodHandlerDictionary handlers,
+            IDbContextFactory<ZcashPluginDbContext> dbContextFactory) : base(eventAggregator, logger)
         {
             _invoiceRepository = invoiceRepository;
             _eventAggregator = eventAggregator;
@@ -60,6 +64,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             _paymentService = paymentService;
             _invoiceActivator = invoiceActivator;
             _handlers = handlers;
+            _dbContextFactory = dbContextFactory;
         }
 
         protected override void SubscribeToEvents()
@@ -120,22 +125,14 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 new InvoiceEvent(invoice, InvoiceEvent.ReceivedPayment) { Payment = payment });
         }
 
-        private async Task<GetTransfersResponse?> SafeGetTransfers(
-            JsonRpcClient client,
+        private async Task<IReadOnlyList<WalletTransfer>> SafeGetTransfersAsync(
+            IZcashWalletBackend walletBackend,
             long accountIndex,
             List<long> subaddrIndices)
         {
             try
             {
-                return await client.SendCommandAsync<GetTransfersRequest, GetTransfersResponse>(
-                    "get_transfers",
-                    new GetTransfersRequest
-                    {
-                        AccountIndex = accountIndex,
-                        In = true,
-                        SubaddrIndices = subaddrIndices.Distinct().ToList()
-                    }
-                );
+                return await walletBackend.GetTransfersAsync(accountIndex, subaddrIndices.Distinct().ToList());
             }
             catch (Exception ex)
             {
@@ -149,7 +146,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             if (!invoices.Any())
                 return;
 
-            var ZcashWalletRpcClient = _ZcashRpcProvider.WalletRpcClients[cryptoCode];
+            var walletBackend = _ZcashRpcProvider.WalletBackends[cryptoCode];
             var network = _networkProvider.GetNetwork(cryptoCode);
 
             var paymentId = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
@@ -187,15 +184,21 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 );
 
                 addressIndexList.AddRange(expandedInvoice.ExistingPayments.Select(ep => ep.PaymentData.SubaddressIndex));
-                addressIndexList.Add(expandedInvoice.PaymentMethodDetails.AddressIndex - 1);
+                addressIndexList.Add(expandedInvoice.PaymentMethodDetails.AddressIndex);
                 accountToAddressQuery[expandedInvoice.PaymentMethodDetails.AccountIndex] = addressIndexList;
             }
 
             Console.WriteLine($"Send RPC commands");
+            
+            if (_ZcashRpcProvider.WalletBackends.TryGetValue(cryptoCode, out var backend))
+            {
+                await backend.SynchronizeAsync(accountToAddressQuery.Keys.ToList());
+            }
+
             // Send RPC commands
             var tasks = accountToAddressQuery.ToDictionary(
                 kvp => kvp.Key,
-                kvp => SafeGetTransfers(ZcashWalletRpcClient, kvp.Key, kvp.Value)
+                kvp => SafeGetTransfersAsync(walletBackend, kvp.Key, kvp.Value)
             );
 
             await Task.WhenAll(tasks.Values);
@@ -209,51 +212,49 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 var response = await kvp.Value;
                 if (response == null)
                     continue;
-                Console.WriteLine($"Account {kvp.Key}: got {response.In?.Count ?? -1} incoming transfers");
-                var transfers = response.In;
+                Console.WriteLine($"Account {kvp.Key}: got {response?.Count ?? -1} incoming transfers");
+                var transfers = response;
                 if (transfers == null || !transfers.Any())
                     continue;
+                
+                // var groupedTransfers = transfers
+                    // .GroupBy(t => (t.TransactionId, t.Address));
+
+                var transfersWithInvoice = new List<(WalletTransfer Transfer, InvoiceEntity Invoice, string UnifiedAddress)>();
 
                 foreach (var transfer in transfers)
                 {
-                    Console.WriteLine($"Processing transfer {transfer.Txid} -> {transfer.Address}, amount: {transfer.Amount}");
+                    await using var ctx = await _dbContextFactory.CreateDbContextAsync();
+                    var ua = await ctx.Receivers.FirstOrDefaultAsync(r =>
+                        r.SaplingAddress == transfer.Address ||
+                        r.OrchardAddress == transfer.Address ||
+                        r.TransparentAddress == transfer.Address);
+                    if (ua == null) continue;
 
-                    // Try to find existing invoice for this transfer
-                    var invoice = await _invoiceRepository.GetInvoiceFromAddress(paymentId, transfer.Address);
-                    Console.WriteLine($"paymentId: {paymentId}");
+                    var invoice = await _invoiceRepository.GetInvoiceFromAddress(paymentId, ua.UnifiedAddress);
+                    if (invoice == null) continue;
 
-                    if (invoice == null)
-                    {
-                        Console.WriteLine($"No invoice found for {transfer.Address}, skipping");
-                        continue; // skip this transfer
-                    }
-                    // else
-                    // {
-                    //     // Fall back to invoice by prompt/destination
-                    //     var newMatch = expandedInvoices.SingleOrDefault(ei => ei.Prompt.Destination == transfer.Address);
-                    //     if (newMatch.Invoice == null)
-                    //     {
-                    //         Console.WriteLine($"No matching invoice for {transfer.Address}, skipping");
-                    //         continue;
-                    //     }
+                    transfersWithInvoice.Add((transfer, invoice, ua.UnifiedAddress));
+                }
 
-                    //     invoice = newMatch.Invoice;
-                    //     Console.WriteLine($"New invoice found: {invoice.Id}");
-                    // }
+                var groupedByTxAndInvoice = transfersWithInvoice
+                    .GroupBy(t => (t.Transfer.TransactionId, t.Invoice.Id));
 
-                    Console.WriteLine($"HandlePaymentData {transfer.Address}, {transfer.Amount}, {transfer.SubaddrIndex.Major}, {transfer.Txid}, ${transfer.Confirmations}, ${transfer.Height}, ${invoice.Id}");
+                foreach (var group in groupedByTxAndInvoice)
+                {
+                    var first = group.First();
+                    var totalAmount = group.Sum(t => t.Transfer.Amount);
 
-                    // Handle payment data
                     await HandlePaymentData(
                         cryptoCode,
-                        transfer.Address,
-                        transfer.Amount,
-                        transfer.SubaddrIndex.Major,
-                        transfer.SubaddrIndex.Minor,
-                        transfer.Txid,
-                        transfer.Confirmations,
-                        transfer.Height,
-                        invoice,
+                        first.UnifiedAddress,
+                        totalAmount,
+                        first.Transfer.AccountIndex,
+                        first.Transfer.AddressIndex,
+                        first.Transfer.TransactionId,
+                        first.Transfer.Confirmations,
+                        first.Transfer.Height,
+                        first.Invoice,
                         updatedPaymentEntities
                     );
                 }
@@ -276,35 +277,44 @@ namespace BTCPayServer.Plugins.ZCash.Services
             await UpdateAnyPendingZcashLikePayment(cryptoCode);
             _eventAggregator.Publish(new NewBlockEvent() { PaymentMethodId = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode) });
         }
+        
 
         private async Task OnTransactionUpdated(string cryptoCode, string transactionHash, long accountIndex)
         {
             var paymentMethodId = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
-            var transfer = await _ZcashRpcProvider.WalletRpcClients[cryptoCode]
-                .SendCommandAsync<GetTransferByTransactionIdRequest, GetTransferByTransactionIdResponse>(
-                    "get_transfer_by_txid",
-                    new GetTransferByTransactionIdRequest() { TransactionId = transactionHash, AccountIndex = accountIndex });
+            var transfer = await _ZcashRpcProvider.WalletBackends[cryptoCode]
+                .GetTransactionAsync(accountIndex, transactionHash);
 
             var paymentsToUpdate = new List<(PaymentEntity Payment, InvoiceEntity invoice)>();
 
             //group all destinations of the tx together and loop through the sets
             foreach (var destination in transfer.Transfers.GroupBy(destination => destination.Address))
             {
+                // await using var ctx = _dbContext;
+                await using var ctx = await _dbContextFactory.CreateDbContextAsync();
+
+                var ua = await ctx.Receivers.FirstOrDefaultAsync(r =>
+                    r.SaplingAddress == destination.Key ||
+                    r.OrchardAddress == destination.Key ||
+                    r.TransparentAddress == destination.Key);
+                if (ua == null)
+                    continue;
+
                 //find the invoice corresponding to this address, else skip
-                var invoice = await _invoiceRepository.GetInvoiceFromAddress(paymentMethodId, destination.Key);
+                var invoice = await _invoiceRepository.GetInvoiceFromAddress(paymentMethodId, ua.UnifiedAddress);
                 if (invoice == null)
                     continue;
 
-                var index = destination.First().SubaddrIndex;
+                var index = destination.First();
 
                 await HandlePaymentData(cryptoCode,
                     destination.Key,
                     destination.Sum(destination1 => destination1.Amount),
-                    index.Major,
-                    index.Minor,
-                    transfer.Transfer.Txid,
-                    transfer.Transfer.Confirmations,
-                    transfer.Transfer.Height
+                    index.AccountIndex,
+                    index.AddressIndex,
+                    transfer.TransactionId,
+                    transfer.Confirmations,
+                    transfer.Height
                     , invoice, paymentsToUpdate);
             }
 
@@ -326,19 +336,10 @@ namespace BTCPayServer.Plugins.ZCash.Services
             string txId, long confirmations, long blockHeight, InvoiceEntity invoice,
             List<(PaymentEntity Payment, InvoiceEntity invoice)> paymentsToUpdate)
         {
-            Console.WriteLine($"[HandlePaymentData] START - cryptoCode={cryptoCode}, address={address}, " +
-                $"totalAmount={totalAmount}, txId={txId}, invoiceId={invoice.Id}");
-
             var network = _networkProvider.GetNetwork(cryptoCode);
-            Console.WriteLine($"[HandlePaymentData] Network resolved: {network?.CryptoCode}");
-
             var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
-            Console.WriteLine($"[HandlePaymentData] PaymentMethodId: {pmi}");
-
             var handler = (ZcashLikePaymentMethodHandler)_handlers[pmi];
             var promptDetails = handler.ParsePaymentPromptDetails(invoice.GetPaymentPrompt(pmi).Details);
-            Console.WriteLine($"[HandlePaymentData] InvoiceSettledConfirmationThreshold=" +
-                $"{promptDetails.InvoiceSettledConfirmationThreshold}");
 
             var details = new ZcashLikePaymentData()
             {
@@ -350,64 +351,45 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 InvoiceSettledConfirmationThreshold = promptDetails.InvoiceSettledConfirmationThreshold
             };
 
-            var isSettled = GetStatus(details, invoice.SpeedPolicy);
-            var status = isSettled ? PaymentStatus.Settled : PaymentStatus.Processing;
-            Console.WriteLine($"[HandlePaymentData] confirmations={confirmations}, " +
-                $"speedPolicy={invoice.SpeedPolicy}, isSettled={isSettled}, status={status}");
+            var paymentId = $"{txId}#{subaccountIndex}#{subaddressIndex}";
 
-            var paymentData = new Data.PaymentData()
+            // Look up existing payment FIRST
+            var allPayments = GetAllZcashLikePayments(invoice, cryptoCode);
+            var alreadyExistingPaymentThatMatches = allPayments
+                .FirstOrDefault(c => c.Id == paymentId && c.PaymentMethodId == pmi);
+
+            // Now compute status, taking into account any existing Settled state
+            var isSettled = GetStatus(details, invoice.SpeedPolicy);
+            var newStatus = isSettled ? PaymentStatus.Settled : PaymentStatus.Processing;
+            var status = alreadyExistingPaymentThatMatches?.Status == PaymentStatus.Settled
+                ? PaymentStatus.Settled
+                : newStatus;
+
+            var paymentData = new PaymentData()
             {
                 Status = status,
                 Amount = ZcashMoney.Convert(totalAmount),
                 Created = DateTimeOffset.UtcNow,
-                Id = $"{txId}#{subaccountIndex}#{subaddressIndex}",
+                Id = paymentId,
                 Currency = network.CryptoCode
             }.Set(invoice, handler, details);
-            Console.WriteLine($"[HandlePaymentData] totalAmount (raw zats?) = {totalAmount}");
-            var convertedAmount = ZcashMoney.Convert(totalAmount);
-            Console.WriteLine($"[HandlePaymentData] convertedAmount (ZEC) = {convertedAmount}");
-
-
-            Console.WriteLine($"[HandlePaymentData] paymentData.Id={paymentData.Id}, " +
-                $"Amount={paymentData.Amount}, Currency={paymentData.Currency}");
-
-            var allPayments = GetAllZcashLikePayments(invoice, cryptoCode);
-            Console.WriteLine($"[HandlePaymentData] Found {allPayments.Count()} existing payments for invoice");
-
-            var alreadyExistingPaymentThatMatches = allPayments
-                .SingleOrDefault(c => c.Id == paymentData.Id && c.PaymentMethodId == pmi);
-
-            Console.WriteLine($"[HandlePaymentData] Match found: {alreadyExistingPaymentThatMatches != null}");
 
             if (alreadyExistingPaymentThatMatches == null)
             {
-                Console.WriteLine("[HandlePaymentData] Adding new payment...");
                 var payment = await _paymentService.AddPayment(paymentData, [txId]);
-                Console.WriteLine($"[HandlePaymentData] AddPayment result: {(payment != null ? "success" : "null")}");
-
                 if (payment != null)
                 {
-                    Console.WriteLine("[HandlePaymentData] Calling ReceivedPayment...");
                     await ReceivedPayment(invoice, payment);
-                    Console.WriteLine("[HandlePaymentData] ReceivedPayment completed.");
                 }
             }
             else
             {
-                Console.WriteLine($"[HandlePaymentData] Updating existing payment. " +
-                    $"OldStatus={alreadyExistingPaymentThatMatches.Status}, NewStatus={status}");
-
                 alreadyExistingPaymentThatMatches.Status = status;
-                // alreadyExistingPaymentThatMatches.Value = ZcashMoney.Convert(totalAmount);
-                // alreadyExistingPaymentThatMatches.UpdateAmounts();
+                alreadyExistingPaymentThatMatches.Value = ZcashMoney.Convert(totalAmount);
+                alreadyExistingPaymentThatMatches.UpdateAmounts();
                 alreadyExistingPaymentThatMatches.Details = JToken.FromObject(details, handler.Serializer);
                 paymentsToUpdate.Add((alreadyExistingPaymentThatMatches, invoice));
-
-                Console.WriteLine($"[HandlePaymentData] Added to paymentsToUpdate. " +
-                    $"Total pending updates: {paymentsToUpdate.Count}");
             }
-
-            Console.WriteLine("[HandlePaymentData] END");
         }
 
         private bool GetStatus(ZcashLikePaymentData details, SpeedPolicy speedPolicy)

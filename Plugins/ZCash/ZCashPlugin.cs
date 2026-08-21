@@ -17,6 +17,7 @@ using BTCPayServer.Plugins.ZCash.Configuration;
 using System;
 using Microsoft.Extensions.Configuration;
 using BTCPayServer.Abstractions.Models;
+using BTCPayServer.Plugins.ZCash.Data;
 using NBXplorer;
 using BTCPayServer.Plugins.ZCash.Services;
 
@@ -64,7 +65,18 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             ConfigureZcashLikeConfiguration(provider));
         services.AddSingleton<ZcashRPCProvider>();
         services.AddHostedService<ZcashLikeSummaryUpdaterHostedService>();
+        services.AddHostedService<ZcashWalletEventHostedService>();
         services.AddHostedService<ZcashListener>();
+        
+        services.AddSingleton<ZcashPluginDbContextFactory>();
+        services.AddDbContextFactory<ZcashPluginDbContext>((provider, optionsBuilder) =>
+        {
+            var factory = provider.GetRequiredService<ZcashPluginDbContextFactory>();
+            factory.ConfigureBuilder(optionsBuilder);
+        });
+        services.AddHostedService<ZcashMigrationRunner>();
+        services.AddSingleton<ICheckoutCheatModeExtension>(provider =>
+            (ICheckoutCheatModeExtension)ActivatorUtilities.CreateInstance(provider, typeof(ZcashCheckoutCheatModeExtension), new object[] { network, pmi }));
 
 
         services.AddSingleton<IPaymentMethodHandler>(provider =>
@@ -91,28 +103,49 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
 
         foreach (var ZcashLikeSpecificBtcPayNetwork in supportedNetworks)
         {
+            var walletBackendTypeStr =
+                configuration.GetOrDefault<string>(
+                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_backend_type", null);
+
+            var walletBackendType =
+                !string.IsNullOrEmpty(walletBackendTypeStr) &&
+                Enum.TryParse<WalletBackend>(walletBackendTypeStr, true, out var parsed)
+                    ? parsed
+                    : WalletBackend.Walletd;
             var daemonUri =
                 configuration.GetOrDefault<Uri?>($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_daemon_uri",
                     null);
             var walletDaemonUri =
                 configuration.GetOrDefault<Uri?>(
                     $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_uri", null);
+            var graphQlEndpointUri =
+                configuration.GetOrDefault<Uri?>(
+                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_graphql_uri", null);
+            var cashcowEndpointUri =
+                configuration.GetOrDefault<Uri?>(
+                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_cashcow_uri", null);
             var walletDaemonWalletDirectory =
                 configuration.GetOrDefault<string?>(
                     $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_walletdir", null);
             var walletDaemonConfigFile =
                 configuration.GetOrDefault<string?>(
-                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_config_path", Path.Combine(walletDaemonWalletDirectory, "config.json"));
-            if (daemonUri == null || walletDaemonUri == null || walletDaemonWalletDirectory == null)
+                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_config_path",
+                    string.IsNullOrEmpty(walletDaemonWalletDirectory) ? null : Path.Combine(walletDaemonWalletDirectory, "config.json"));
+            if (walletBackendType == WalletBackend.Walletd &&
+                (daemonUri == null || walletDaemonUri == null || walletDaemonWalletDirectory == null))
             {
                 throw new ConfigException($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode} is misconfigured");
             }
+            if (walletBackendType == WalletBackend.ZkoolGraphQL && graphQlEndpointUri == null)
+            {
+                throw new ConfigException($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode} GraphQL wallet is misconfigured");
+            }
             // Temp patch
-            if (System.IO.File.Exists(Path.Combine(walletDaemonWalletDirectory, "zec-wallet2.db")) && walletDaemonConfigFile == Path.Combine(walletDaemonWalletDirectory, "config.json")) {
+            if (!string.IsNullOrEmpty(walletDaemonWalletDirectory) && System.IO.File.Exists(Path.Combine(walletDaemonWalletDirectory, "zec-wallet2.db")) && walletDaemonConfigFile == Path.Combine(walletDaemonWalletDirectory, "config.json")) {
                 walletDaemonConfigFile = Path.Combine(walletDaemonWalletDirectory, "config2.json");
             }
             // Temp patch
-            if (walletDaemonConfigFile == "/data/config2.json") {
+            if (walletDaemonConfigFile == "/data/config2.json" && !string.IsNullOrEmpty(walletDaemonWalletDirectory)) {
                 walletDaemonConfigFile = Path.Combine(walletDaemonWalletDirectory, "config2.json");
             }
 
@@ -120,8 +153,11 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             {
                 DaemonRpcUri = daemonUri,
                 InternalWalletRpcUri = walletDaemonUri,
+                GraphQlEndpointUri = graphQlEndpointUri,
+                CashCowEndpointUri = cashcowEndpointUri,
                 WalletDirectory = walletDaemonWalletDirectory,
-                ConfigFile = walletDaemonConfigFile
+                ConfigFile = walletDaemonConfigFile,
+                WalletBackend = walletBackendType
             });
         }
         return result;

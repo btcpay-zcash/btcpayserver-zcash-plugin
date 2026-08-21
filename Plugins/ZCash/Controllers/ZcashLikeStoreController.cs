@@ -25,6 +25,7 @@ using BTCPayServer.Services.Stores;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.Extensions.Localization;
 
@@ -73,7 +74,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             return new ZcashLikePaymentMethodListViewModel()
             {
                 Items = _ZcashLikeConfiguration.ZcashLikeConfigurationItems.Select(pair =>
-                    GetZcashLikePaymentMethodViewModel(StoreData, pair.Key, excludeFilters))
+                    GetZcashLikePaymentMethodViewModel(StoreData, pair.Key, excludeFilters, accountsList[pair.Key].Result))
             };
         }
 
@@ -96,22 +97,21 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             };
         }
 
-        private Task<GetAccountsResponse> GetAccounts(string cryptoCode)
+        private Task<IReadOnlyList<WalletAccount>> GetAccounts(string cryptoCode)
         {
             try
             {
                 if (_ZcashRpcProvider.Summaries.TryGetValue(cryptoCode, out var summary) && summary.WalletAvailable)
                 {
-
-                    return _ZcashRpcProvider.WalletRpcClients[cryptoCode].SendCommandAsync<GetAccountsRequest, GetAccountsResponse>("get_accounts", new GetAccountsRequest());
+                    return _ZcashRpcProvider.WalletBackends[cryptoCode].GetAccountsAsync();
                 }
             }
             catch { }
-            return Task.FromResult<GetAccountsResponse>(null);
+            return Task.FromResult<IReadOnlyList<WalletAccount>>(null);
         }
 
         private ZcashLikePaymentMethodViewModel GetZcashLikePaymentMethodViewModel(
-            StoreData storeData, string cryptoCode, IPaymentFilter excludeFilters)
+            StoreData storeData, string cryptoCode, IPaymentFilter excludeFilters, IReadOnlyList<WalletAccount> accounts = null)
         {
             var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
             var config = storeData.GetPaymentMethodConfig<ZcashPaymentMethodConfig>(pmi, _handlers);
@@ -136,11 +136,17 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
 
             return new ZcashLikePaymentMethodViewModel
             {
-                WalletFileFound = System.IO.File.Exists(configurationItem?.ConfigFile),
+                UsesWalletFile = configurationItem?.WalletBackend == WalletBackend.Walletd,
+                WalletFileFound = configurationItem?.WalletBackend != WalletBackend.Walletd || System.IO.File.Exists(configurationItem?.ConfigFile),
                 Enabled = config?.AccountIndex is not null && !excludeFilters.Match(pmi),
                 Summary = summary,
                 CryptoCode = cryptoCode,
                 AccountIndex = config?.AccountIndex,
+                Accounts = accounts?.Select(account => new SelectListItem(
+                    string.IsNullOrEmpty(account.Label)
+                        ? $"Account #{account.AccountIndex}"
+                        : $"{account.Label} (#{account.AccountIndex})",
+                    account.AccountIndex.ToString(CultureInfo.InvariantCulture))),
                 SettlementConfirmationThresholdChoice = settlementThresholdChoice,
                 CustomSettlementConfirmationThreshold =
                     hasValidConfirmations &&
@@ -166,7 +172,8 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             }
 
             var vm = GetZcashLikePaymentMethodViewModel(StoreData, cryptoCode,
-                StoreData.GetStoreBlob().GetExcludedPaymentMethods());
+                StoreData.GetStoreBlob().GetExcludedPaymentMethods(),
+                await GetAccounts(cryptoCode));
             return View("/Views/Zcash/GetStoreZcashLikePaymentMethod.cshtml", vm);
         }
 
@@ -186,35 +193,33 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             }
 
             if (command == "add-account")
-                {
-                    if (config.AccountIndex is not null)
             {
-                TempData.SetStatusMessageModel(new StatusMessageModel
+                if (config.AccountIndex is not null)
                 {
-                    Severity = StatusMessageModel.StatusSeverity.Error,
-                    Message = StringLocalizer["This store already has an account configured."].Value
-                });
-                return RedirectToAction(nameof(GetStoreZcashLikePaymentMethod),
-                    new { storeId = store.Id, cryptoCode });
-            }
+                    TempData.SetStatusMessageModel(new StatusMessageModel
+                    {
+                        Severity = StatusMessageModel.StatusSeverity.Error,
+                        Message = StringLocalizer["This store already has an account configured."].Value
+                    });
+                    return RedirectToAction(nameof(GetStoreZcashLikePaymentMethod),
+                        new { storeId = store.Id, cryptoCode });
+                }
 
-            if (string.IsNullOrWhiteSpace(viewModel.WalletPassword))
-                ModelState.AddModelError(nameof(viewModel.WalletPassword),
-                    StringLocalizer["A viewing key is required."]);
+                if (string.IsNullOrWhiteSpace(viewModel.WalletPassword))
+                    ModelState.AddModelError(nameof(viewModel.WalletPassword),
+                        StringLocalizer["A viewing key is required."]);
 
                 try
                 {
-                    var newAccount = await _ZcashRpcProvider.WalletRpcClients[cryptoCode]
-                .SendCommandAsync<CreateAccountRequest, CreateAccountResponse>(
-                    "create_account",
-                    new CreateAccountRequest
-                    {
-                        Key = viewModel.WalletPassword,
-                        Height = viewModel.BirthHeight,
-                        Label = string.IsNullOrWhiteSpace(viewModel.NewAccountLabel)
-                            ? $"store:{StoreData.Id}"
-                            : viewModel.NewAccountLabel
-                    });
+                    var existingAccounts = await GetAccounts(cryptoCode) ?? Array.Empty<WalletAccount>();
+                    var newAccount = await _ZcashRpcProvider.WalletBackends[cryptoCode]
+                        .CreateAccountAsync(new WalletAccountCreationRequest
+                        {
+                            Key = viewModel.WalletPassword,
+                            BirthHeight = viewModel.BirthHeight,
+                            Label = $"store:{StoreData.Id}",
+                            // AccountIndex = existingAccounts.Any() ? existingAccounts.Max(account => account.AccountIndex) + 1 : 1
+                        });
 
                     // Persist immediately so the account is never orphaned
                     // var store = StoreData;
@@ -239,86 +244,6 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                 }
 
             }
-            else if (command == "upload-wallet")
-            {
-                var valid = true;
-                if (viewModel.BirthHeight == null)
-                {
-                    ModelState.AddModelError(nameof(viewModel.BirthHeight), StringLocalizer["Please enter a viewing key"]);
-                    valid = false;
-                }
-                if (viewModel.WalletPassword == null)
-                {
-                    ModelState.AddModelError(nameof(viewModel.WalletPassword), StringLocalizer["Please enter a viewing key"]);
-                    valid = false;
-                }
-                if (configurationItem.WalletDirectory == null)
-                {
-                    ModelState.AddModelError(nameof(viewModel.WalletPassword), StringLocalizer["This installation doesn't support wallet import (BTCPAY_ZEC_WALLET_DAEMON_WALLETDIR is not set)"]);
-                    valid = false;
-                }
-
-                if (valid)
-                {
-                    if (_ZcashRpcProvider.Summaries.TryGetValue(cryptoCode, out var summary))
-                    {
-                        if (summary.WalletAvailable)
-                        {
-                            TempData.SetStatusMessageModel(new StatusMessageModel
-                            {
-                                Severity = StatusMessageModel.StatusSeverity.Error,
-                                Message = StringLocalizer["There is already an active wallet configured for {0}. Replacing it would break any existing invoices!", cryptoCode].Value
-                            });
-                            return RedirectToAction(nameof(GetStoreZcashLikePaymentMethod),
-                                new { cryptoCode });
-                        }
-                    }
-
-                    var configFile = configurationItem.ConfigFile;
-
-                    JsonObject json;
-                    if (System.IO.File.Exists(configFile))
-                    {
-                        using (var fs = new FileStream(configFile, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
-                        using (var reader = new StreamReader(fs))
-                        {
-                            var jsonText = await reader.ReadToEndAsync();
-                            json = JsonNode.Parse(jsonText)?.AsObject() ?? new JsonObject();
-                        }
-                    }
-                    else
-                    {
-                        json = new JsonObject();
-                    }
-
-                    try
-                    {
-                        json["vk"] = viewModel.WalletPassword;
-                        json["birth_height"] = viewModel.BirthHeight;
-
-                        string jsonOutput = JsonSerializer.Serialize(json, new JsonSerializerOptions { WriteIndented = true });
-
-                        using (var fs = new FileStream(configFile, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
-                        using (var writer = new StreamWriter(fs))
-                        {
-                            await writer.WriteAsync(jsonOutput);
-                        }
-
-                        Exec($"chmod 666 {configFile}");
-                    }
-                    catch
-                    {
-                        ModelState.AddModelError(nameof(viewModel.AccountIndex), StringLocalizer["Could not write wallet file."]);
-                    }
-
-                    TempData.SetStatusMessageModel(new StatusMessageModel
-                    {
-                        Severity = StatusMessageModel.StatusSeverity.Info,
-                        Message = StringLocalizer["Wallet config uploaded. Please restart the wallet daemon."].Value
-                    });
-                    return RedirectToAction(nameof(GetStoreZcashLikePaymentMethod), new { cryptoCode });
-                }
-            }
 
             if (viewModel.AccountIndex is null)
             {
@@ -331,11 +256,12 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             {
 
                 var vm = GetZcashLikePaymentMethodViewModel(StoreData, cryptoCode,
-                    StoreData.GetStoreBlob().GetExcludedPaymentMethods());
+                    StoreData.GetStoreBlob().GetExcludedPaymentMethods(),
+                    await GetAccounts(cryptoCode));
 
                 vm.Enabled = viewModel.Enabled;
-                vm.NewAccountLabel = viewModel.NewAccountLabel;
-                vm.AccountIndex = viewModel.AccountIndex;
+                // vm.NewAccountLabel = viewModel.NewAccountLabel;
+                vm.AccountIndex = config.AccountIndex;
                 vm.SettlementConfirmationThresholdChoice = viewModel.SettlementConfirmationThresholdChoice;
                 vm.CustomSettlementConfirmationThreshold = viewModel.CustomSettlementConfirmationThreshold;
                 return View("/Views/Zcash/GetStoreZcashLikePaymentMethod.cshtml", vm);
@@ -356,56 +282,58 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                 }
             });
 
-            var fileConfig = configurationItem.ConfigFile;
-
-            JsonObject jsonObj;
-            if (System.IO.File.Exists(fileConfig))
+            if (configurationItem.WalletBackend == WalletBackend.Walletd)
             {
-                using (var fs = new FileStream(fileConfig, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
-                using (var reader = new StreamReader(fs))
+                var fileConfig = configurationItem.ConfigFile;
+
+                JsonObject jsonObj;
+                if (System.IO.File.Exists(fileConfig))
                 {
-                    var jsonText = await reader.ReadToEndAsync();
-                    jsonObj = JsonNode.Parse(jsonText)?.AsObject() ?? new JsonObject();
-                }
-            }
-            else
-            {
-                jsonObj = new JsonObject();
-            }
-
-            long? confirmations = viewModel.SettlementConfirmationThresholdChoice switch
-            {
-                ZcashLikeSettlementThresholdChoice.ZeroConfirmation => 0,
-                ZcashLikeSettlementThresholdChoice.AtLeastOne => 1,
-                ZcashLikeSettlementThresholdChoice.AtLeastSix => 6,
-                ZcashLikeSettlementThresholdChoice.Custom when viewModel.CustomSettlementConfirmationThreshold is { } custom => custom,
-                _ => null
-            };
-
-            try
-            {
-                if (confirmations.HasValue)
-                {
-                    jsonObj["confirmations"] = confirmations.Value;
-                    string jsonOutput = JsonSerializer.Serialize(jsonObj, new JsonSerializerOptions { WriteIndented = true });
-
-                    using (var fs = new FileStream(fileConfig, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
-                    using (var writer = new StreamWriter(fs))
+                    using (var fs = new FileStream(fileConfig, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true))
+                    using (var reader = new StreamReader(fs))
                     {
-                        await writer.WriteAsync(jsonOutput);
+                        var jsonText = await reader.ReadToEndAsync();
+                        jsonObj = JsonNode.Parse(jsonText)?.AsObject() ?? new JsonObject();
                     }
                 }
                 else
                 {
-                    // Handle null case if needed, or throw
-                    throw new InvalidOperationException("Invalid settlement confirmation threshold.");
+                    jsonObj = new JsonObject();
                 }
 
-                Exec($"chmod 666 {fileConfig}");
-            }
-            catch
-            {
-                ModelState.AddModelError(nameof(viewModel.AccountIndex), StringLocalizer["Could not write wallet file."]);
+                long? confirmations = viewModel.SettlementConfirmationThresholdChoice switch
+                {
+                    ZcashLikeSettlementThresholdChoice.ZeroConfirmation => 0,
+                    ZcashLikeSettlementThresholdChoice.AtLeastOne => 1,
+                    ZcashLikeSettlementThresholdChoice.AtLeastSix => 6,
+                    ZcashLikeSettlementThresholdChoice.Custom when viewModel.CustomSettlementConfirmationThreshold is { } custom => custom,
+                    _ => null
+                };
+
+                try
+                {
+                    if (confirmations.HasValue)
+                    {
+                        jsonObj["confirmations"] = confirmations.Value;
+                        string jsonOutput = JsonSerializer.Serialize(jsonObj, new JsonSerializerOptions { WriteIndented = true });
+
+                        using (var fs = new FileStream(fileConfig, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
+                        using (var writer = new StreamWriter(fs))
+                        {
+                            await writer.WriteAsync(jsonOutput);
+                        }
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException("Invalid settlement confirmation threshold.");
+                    }
+
+                    Exec($"chmod 666 {fileConfig}");
+                }
+                catch
+                {
+                    ModelState.AddModelError(nameof(viewModel.AccountIndex), StringLocalizer["Could not write wallet file."]);
+                }
             }
 
             blob.SetExcluded(PaymentTypes.CHAIN.GetPaymentMethodId(viewModel.CryptoCode), !viewModel.Enabled);
@@ -452,11 +380,13 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
         {
             public ZcashRPCProvider.ZcashLikeSummary Summary { get; set; }
             public string CryptoCode { get; set; }
-            public string NewAccountLabel { get; set; }
+            // public string NewAccountLabel { get; set; }
+            [BindNever]
             public long? AccountIndex { get; set; }
             public bool Enabled { get; set; }
 
             public IEnumerable<SelectListItem> Accounts { get; set; }
+            public bool UsesWalletFile { get; set; }
             public bool WalletFileFound { get; set; }
             [Display(Name = "Birth Height")]
             public long? BirthHeight { get; set; }
