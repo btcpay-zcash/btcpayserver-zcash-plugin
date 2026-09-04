@@ -1,16 +1,34 @@
+@using BTCPayServer.Components.MainNav
+@using BTCPayServer.Payments
 @using BTCPayServer.Plugins.ZCash.Configuration
 @using BTCPayServer.Plugins.ZCash.Controllers
+@using BTCPayServer.Plugins.ZCash.Services
+@using BTCPayServer.Services
 @using Microsoft.AspNetCore.Mvc.TagHelpers
-@using BTCPayServer.Abstractions.Contracts
-@inject SignInManager<ApplicationUser> SignInManager;
-@inject ZcashLikeConfiguration ZcashLikeConfiguration;
-@inject IScopeProvider ScopeProvider
+@inject SignInManager<ApplicationUser> SignInManager
+@inject ZcashLikeConfiguration ZcashLikeConfiguration
+@inject ZcashRPCProvider ZcashRpcProvider
+@inject PrettyNameProvider PrettyName
+@model MainNavViewModel
 @{
-    var storeId = ScopeProvider.GetCurrentStoreId();
-    var isActive = !string.IsNullOrEmpty(storeId) && ViewContext.RouteData.Values.TryGetValue("Controller", out var controller) && controller is not null && 
+    var store = Model?.Store;
+    var isActive = ViewContext.RouteData.Values.TryGetValue("Controller", out var controller) && controller is not null &&
                    nameof(UIZcashLikeStoreController).StartsWith(controller.ToString() ?? string.Empty, StringComparison.InvariantCultureIgnoreCase);
 }
-@if (SignInManager.IsSignedIn(User) && User.IsInRole(Roles.ServerAdmin) && ZcashLikeConfiguration.ZcashLikeConfigurationItems.Any())
+@if (store != null && SignInManager.IsSignedIn(User) && User.IsInRole(Roles.ServerAdmin))
 {
-    <a class="nav-link @(isActive ? "active" : string.Empty)" asp-route-storeId="@storeId" asp-action="GetStoreZcashLikePaymentMethods" asp-controller="UIZcashLikeStore">Zcash</a>
+    var excludeFilters = store.GetStoreBlob().GetExcludedPaymentMethods();
+    foreach (var cryptoCode in ZcashLikeConfiguration.ZcashLikeConfigurationItems.Keys)
+    {
+        var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
+        var enabled = !excludeFilters.Match(pmi);
+        var available = ZcashRpcProvider.IsAvailable(cryptoCode);
+        var status = enabled && available ? "enabled" : "disabled";
+        <li class="nav-item">
+            <a asp-controller="UIZcashLikeStore" asp-action="GetStoreZcashLikePaymentMethod" asp-route-storeId="@store.Id" asp-route-cryptoCode="@cryptoCode" class="nav-link @(isActive ? "active" : string.Empty)" id="@($"StoreNav-Wallet{cryptoCode}")">
+                <span class="me-2 btcpay-status btcpay-status--@status"></span>
+                <span>@PrettyName.PrettyName(pmi)</span>
+            </a>
+        </li>
+    }
 }

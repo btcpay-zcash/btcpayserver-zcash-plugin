@@ -96,12 +96,8 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             StoreData storeData, string cryptoCode,
             IPaymentFilter excludeFilters, GetAccountsResponse accountsResponse)
         {
-            var Zcash = storeData.GetPaymentMethodConfigs(_handlers)
-                .Where(s => s.Key is ZcashPaymentMethodConfig)
-                .Select(s => (PaymentMethodId: s.Key, Details: (ZcashPaymentPromptDetails)s.Value));
-            var _config = (ZcashPaymentMethodConfig)storeData.GetPaymentMethodConfigs(_handlers).FirstOrDefault().Value;
             var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
-            var settings = Zcash.Where(method => method.PaymentMethodId == pmi).Select(m => m.Details).SingleOrDefault();
+            var _config = storeData.GetPaymentMethodConfig<ZcashPaymentMethodConfig>(pmi, _handlers);
             _ZcashRpcProvider.Summaries.TryGetValue(cryptoCode, out var summary);
             _ZcashLikeConfiguration.ZcashLikeConfigurationItems.TryGetValue(cryptoCode,
                 out var configurationItem);
@@ -156,48 +152,6 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             //     };
             // }
 
-            if (settings != null)
-            {
-                Console.WriteLine($"settings: {settings}");
-            }
-            else
-            {
-                Console.WriteLine("settings is null.");
-
-                try
-                {
-                    Console.WriteLine($"Zcash: {Zcash.Where(method => method.PaymentMethodId == pmi)}");
-
-                    Console.WriteLine(Zcash.Count());
-                    Console.WriteLine(Zcash.ToList().Count());
-                    Console.WriteLine("pmi: " + pmi);
-                    var nullPaymentMethods = Zcash.Where(method => method.PaymentMethodId == null).ToList();
-                    Console.WriteLine("Items with null PaymentMethodId: " + nullPaymentMethods.Count());
-
-                    // var settings2 = Zcash.Where(method => method.PaymentMethodId == pmi).FirstOrDefault();
-                    // if (settings2 != null)
-                    // {
-                    //     Console.WriteLine($"settings2.Value: {settings2.Value}");
-                    // }
-
-                    var allConfigs = storeData.GetPaymentMethodConfigs(_handlers);
-                    Console.WriteLine($"Total configs: {allConfigs.Count()}");
-                    Console.WriteLine($"_config.InvoiceSettledConfirmationThreshold: {_config.InvoiceSettledConfirmationThreshold}");
-                    Console.WriteLine($"_config.AccountIndex: {_config.AccountIndex}");
-
-                    var _config2 = storeData.GetPaymentMethodConfigs(_handlers).FirstOrDefault();
-                    if (_config2.Value != null)
-                    {
-                        Console.WriteLine($"Config type: {_config2.Value.GetType()}");
-                        Console.WriteLine("Config properties:");
-                        foreach (var prop in _config2.Value.GetType().GetProperties())
-                        {
-                            Console.WriteLine($"{prop.Name}: {prop.GetValue(_config2.Value)}");
-                        }
-                    }
-                }
-                catch (Exception) { }
-            }
 
             return new ZcashLikePaymentMethodViewModel()
             {
