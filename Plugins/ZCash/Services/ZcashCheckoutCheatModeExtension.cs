@@ -18,60 +18,39 @@ public class GenerateBlocksNoAddress
 public class ZcashCheckoutCheatModeExtension : ICheckoutCheatModeExtension
 {
     private readonly ZcashRPCProvider _rpcProvider;
-    private readonly ZkoolGraphQlClient _graphQlClient;
+    // private readonly ZkoolGraphQlClient _graphQlClient;
     private readonly ZcashLikeSpecificBtcPayNetwork _network;
     private readonly PaymentMethodId _paymentMethodId;
 
     public ZcashCheckoutCheatModeExtension(
         ZcashRPCProvider rpcProvider,
-        ZkoolGraphQlClient graphQlClient,
+        // ZkoolGraphQlClient graphQlClient,
         ZcashLikeSpecificBtcPayNetwork network,
         PaymentMethodId paymentMethodId)
     {
         _rpcProvider = rpcProvider;
-        _graphQlClient = graphQlClient;
+        // _graphQlClient = graphQlClient;
         _network = network;
         _paymentMethodId = paymentMethodId;
     }
 
     public bool Handle(PaymentMethodId paymentMethodId) => _paymentMethodId == paymentMethodId;
     
-    private async Task CreateTestWallet(string label, string key, string passphrase, long birthHeight, bool useInternalAddresses)
-    {
-        var data = await _graphQlClient.SendAsync(@"
-mutation($newAccount: NewAccount!) {
-  createAccount(newAccount: $newAccount)
-}", new
-        {
-            newAccount = new
-            {
-                name = label,
-                key = key,
-                passphrase = passphrase,
-                aindex = 0,
-                birth = birthHeight,
-                useInternal = useInternalAddresses
-            }
-        });
-
-
-        var createdId = data["createAccount"]!.Value<long>();
-    }
 
     public async Task<ICheckoutCheatModeExtension.PayInvoiceResult> PayInvoice(
         ICheckoutCheatModeExtension.PayInvoiceContext payInvoiceContext)
     {
-        var amount = payInvoiceContext.Amount;
-        for (int i = 0; i < _network.Divisibility; i++)
-        {
-            amount *= 10;
-        }
 
-        // var cashcow = _rpcProvider.CashCowWalletGqlClients[_network.CryptoCode];
-        // var accountId = _rpcProvider.CashCowAccountIds[_network.CryptoCode];
-        var accountId = 0;
 
-        var payResult = await _graphQlClient.SendAsync(
+        var cashcow = _rpcProvider.CashCowWalletGraphQlClients[_network.CryptoCode.ToUpperInvariant()];
+        var accountId = 1;
+        
+        await cashcow.SendAsync(@"
+mutation($idAccounts: [Int!]!) {
+  synchronize(idAccounts: $idAccounts)
+}", new { idAccounts = accountId });
+
+        var payResult = await cashcow.SendAsync(
             @"mutation Pay($id: Int!, $payment: Payment!) {
                 pay(idAccount: $id, payment: $payment)
             }",
@@ -85,10 +64,9 @@ mutation($newAccount: NewAccount!) {
                         new
                         {
                             address = payInvoiceContext.PaymentPrompt.Destination,
-                            amount = (long)amount
+                            amount = payInvoiceContext.Amount
                         }
-                    },
-                    recipientPaysFee = true
+                    }
                 }
             });
 
@@ -100,11 +78,15 @@ mutation($newAccount: NewAccount!) {
     public async Task<ICheckoutCheatModeExtension.MineBlockResult> MineBlock(
         ICheckoutCheatModeExtension.MineBlockContext mineBlockContext)
     {
-        var daemon = _rpcProvider.DaemonRpcClients[_network.CryptoCode];
+        var daemon = _rpcProvider.CashcowDaemonRpcClients[_network.CryptoCode];
+        var cashcow = _rpcProvider.CashCowWalletGraphQlClients[_network.CryptoCode.ToUpperInvariant()];
 
-        await daemon.SendCommandAsync<GenerateBlocksNoAddress, JsonRpcClient.NoRequestModel>(
-            "generate",
-            new GenerateBlocksNoAddress { AmountOfBlocks = mineBlockContext.BlockCount });
+
+        await daemon.SendRpc10CommandAsync<int[], string[]>("generate", new[] { mineBlockContext.BlockCount });
+        await cashcow.SendAsync(@"
+mutation($idAccounts: [Int!]!) {
+  synchronize(idAccounts: $idAccounts)
+}", new { idAccounts = 1 });
 
         return new ICheckoutCheatModeExtension.MineBlockResult();
     }

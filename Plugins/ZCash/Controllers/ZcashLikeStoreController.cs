@@ -245,11 +245,15 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
 
             }
 
-            if (viewModel.AccountIndex is null)
+            if (config.AccountIndex is null && viewModel.Enabled)
             {
                 ModelState.AddModelError(nameof(viewModel.AccountIndex), 
                     "An account must be created before enabling this payment method.");
-                
+            }
+            else if (config.AccountIndex is null && viewModel.Enabled)
+            {
+                ModelState.AddModelError(nameof(viewModel.AccountIndex), 
+                    "Account doesn't exist. Please create an account.");
             }
 
             if (!ModelState.IsValid)
@@ -271,7 +275,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             var blob = storeData.GetStoreBlob();
             storeData.SetPaymentMethodConfig(_handlers[PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode)], new ZcashPaymentPromptDetails()
             {
-                AccountIndex = viewModel.AccountIndex!.Value,
+                AccountIndex = config.AccountIndex ?? 0,
                 InvoiceSettledConfirmationThreshold = viewModel.SettlementConfirmationThresholdChoice switch
                 {
                     ZcashLikeSettlementThresholdChoice.ZeroConfirmation => 0,

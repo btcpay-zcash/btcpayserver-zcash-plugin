@@ -14,6 +14,8 @@ namespace BTCPayServer.Plugins.ZCash.Configuration
     public class ZcashLikeConfigurationItem
     {
         public Uri DaemonRpcUri { get; set; }
+        public Uri CashcowDaemonRpcUri { get; set; }
+        public string CashcowMinerSeed { get; set; }
         public Uri InternalWalletRpcUri { get; set; }
         public Uri GraphQlEndpointUri { get; set; }
         public Uri CashCowEndpointUri { get; set; }

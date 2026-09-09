@@ -75,8 +75,8 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             factory.ConfigureBuilder(optionsBuilder);
         });
         services.AddHostedService<ZcashMigrationRunner>();
-        services.AddSingleton<ICheckoutCheatModeExtension>(provider =>
-            (ICheckoutCheatModeExtension)ActivatorUtilities.CreateInstance(provider, typeof(ZcashCheckoutCheatModeExtension), new object[] { network, pmi }));
+        services.AddSingleton(provider =>
+            (ICheckoutCheatModeExtension)ActivatorUtilities.CreateInstance(provider, typeof(ZcashCheckoutCheatModeExtension), [network, pmi]));
 
 
         services.AddSingleton<IPaymentMethodHandler>(provider =>
@@ -115,6 +115,12 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             var daemonUri =
                 configuration.GetOrDefault<Uri?>($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_daemon_uri",
                     null);
+            var cashcowDaemonUri =
+                configuration.GetOrDefault<Uri?>($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_cashcow_daemon_uri",
+                    null);
+            var cashcowMinerSeed =
+                configuration.GetOrDefault<string?>($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_cashcow_miner_seed",
+                    null);
             var walletDaemonUri =
                 configuration.GetOrDefault<Uri?>(
                     $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_uri", null);
@@ -152,6 +158,8 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             result.ZcashLikeConfigurationItems.Add(ZcashLikeSpecificBtcPayNetwork.CryptoCode, new ZcashLikeConfigurationItem()
             {
                 DaemonRpcUri = daemonUri,
+                CashcowDaemonRpcUri = cashcowDaemonUri,
+                CashcowMinerSeed = cashcowMinerSeed,
                 InternalWalletRpcUri = walletDaemonUri,
                 GraphQlEndpointUri = graphQlEndpointUri,
                 CashCowEndpointUri = cashcowEndpointUri,
