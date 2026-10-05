@@ -206,6 +206,17 @@ mutation($newAccount: NewAccount!) {
             return data["createAccount"]!.Value<long>();
         }
         
+        internal static async Task WaitForWalletHeightAsync(ZkoolGraphQlClient wallet, long target)
+        {
+            for (var attempt = 0; attempt < 120; attempt++)
+            {
+                var height = await wallet.SendAsync("query { currentHeight }");
+                if (height["currentHeight"]!.Value<long>() >= target) return;
+                await Task.Delay(2000);
+            }
+            throw new TimeoutException($"lightwalletd did not reach height {target}");
+        }
+
         private async Task MakeCashCowFat(ZkoolGraphQlClient cashcow, JsonRpcClient daemon)
         {
             var existing = await cashcow.SendAsync(@"
@@ -243,23 +254,12 @@ mutation($newAccount: NewAccount!) {
                 return;
             }
 
-            // 1. Mine coinbase to the zebra-configured miner address.
+            // Coinbase maturity is relative to the actual chain tip, including reused regtests.
+            var beforeMining = await cashcow.SendAsync("query { currentHeight }");
+            var targetHeight = beforeMining["currentHeight"]!.Value<long>() + MaturityThreshold + 10;
             _logger.LogInformation("Mining blocks for the cashcow...");
-            // await daemon.SendCommandAsync<GenerateBlocksNoAddress, JsonRpcClient.NoRequestModel>(
-            //     "generate",
-            //     new GenerateBlocksNoAddress { AmountOfBlocks = MaturityThreshold + 10 });
             await daemon.SendRpc10CommandAsync<int[], string[]>("generate", new[] { MaturityThreshold + 10 });
-
-            // 2. Wait until lightwalletd ingested the blocks.
-            for (int i = 0; i < 120; i++)
-            {
-                var height = await cashcow.SendAsync("query { currentHeight }");
-                if ((height["currentHeight"]?.Value<long>() ?? 0) >= MaturityThreshold + 10)
-                {
-                    break;
-                }
-                await Task.Delay(2000);
-            }
+            await WaitForWalletHeightAsync(cashcow, targetHeight);
 
             // 3. Get a destination address on the cashcow account.
             var addrData = await cashcow.SendAsync(@"
@@ -304,7 +304,7 @@ mutation($newAccount: NewAccount!) {
                 }", new { idAccounts = new[] { (int)minerId } });
 
             // 5. Shield matured notes from the miner to the cashcow address.
-            var matureHeight = (data["currentHeight"]?.Value<long>() ?? MaturityThreshold + 10) - MaturityThreshold;
+            var matureHeight = targetHeight - MaturityThreshold;
             var notesData = await cashcow.SendAsync(@"
                 query($idAccount: Int!) {
                 notesByAccount(idAccount: $idAccount) { id height value }
@@ -341,6 +341,7 @@ mutation($newAccount: NewAccount!) {
             // await daemon.SendCommandAsync<GenerateBlocksNoAddress, JsonRpcClient.NoRequestModel>(
             //     "generate", new GenerateBlocksNoAddress { AmountOfBlocks = 10 });
             await daemon.SendRpc10CommandAsync<int[], string[]>("generate", new[] { 10 });
+            await WaitForWalletHeightAsync(cashcow, h["currentHeight"]!.Value<long>() + 10);
             await cashcow.SendAsync(@"
                 mutation($idAccounts: [Int!]!) {
                 synchronize(idAccounts: $idAccounts)

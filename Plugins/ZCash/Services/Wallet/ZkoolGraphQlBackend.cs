@@ -380,10 +380,10 @@ query($idAccount: Int!) {
                                ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
                     nextKnown[account.AccountIndex] = seen;
-                    if (!_knownUnconfirmedByAccount.TryGetValue(account.AccountIndex, out var previous))
-                    {
-                        continue;
-                    }
+                    // A newly created account can receive payment before its first poll.
+                    // Treat it as having no previously seen transactions so that payment is discovered.
+                    _knownUnconfirmedByAccount.TryGetValue(account.AccountIndex, out var previous);
+                    previous ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
                     foreach (var txid in seen.Where(txid => !previous.Contains(txid)))
                     {
