@@ -13,11 +13,14 @@ public static class MockWalletServer
         var builder = WebApplication.CreateBuilder(args);
         var app = builder.Build();
         var wallet = new MockWallet();
+        var available = true;
+        app.MapPost("/test/availability/{value:bool}", (bool value) => { available = value; return Results.Ok(); });
         var subscriptions = new ConcurrentDictionary<string, int>();
         app.MapGet("/test/subscriptions", () => subscriptions.Values.Order().ToArray());
         app.MapGet("/health", () => Results.Ok(new { mock = true }));
         app.MapPost("/graphql", async (HttpContext context) =>
         {
+            if (!available) return Results.StatusCode(503);
             var body = await JsonNode.ParseAsync(context.Request.Body) ?? new JsonObject();
             try { return Results.Json(new { data = wallet.Query(body) }); }
             catch (ArgumentException e) { return Results.Json(new { errors = new[] { new { message = e.Message } } }); }

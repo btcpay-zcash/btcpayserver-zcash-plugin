@@ -1,5 +1,7 @@
 # Local testing without Docker
 
+For plugin schema changes, see [Generating database migrations](database-migrations.md).
+
 Requirements: .NET SDK 10, Git, curl, and PostgreSQL 16. On macOS:
 
 ```sh
@@ -24,7 +26,8 @@ operations used for account creation, address allocation, wallet status, balance
 transactions and cheatmode payment. `/rpc` implements `generate`. It starts with a
 funded cashcow account (ID 1), so BTCPay does not need to mine real coinbase funds.
 Unsupported operations return errors rather than silently succeeding. WebSocket
-subscriptions stay idle; payment detection uses the existing polling integration.
+subscriptions stay idle; the mock records active subscriptions for lifecycle tests.
+Payment detection uses the polling integration.
 
 Mock addresses (`uregtest-mock-…`) and transactions are synthetic. This validates
 application plumbing, not Zcash address validity, cryptography, fees, spending
@@ -55,7 +58,11 @@ a separately running server. Each test starts an isolated mock on an ephemeral
 loopback port and uses the real plugin GraphQL/RPC clients, wallet backend, summary
 provider, polling and checkout cheatmode extension. They verify payment amount
 conversion, unconfirmed transaction detection, mining, confirmation counts and
-address filtering, plus explicit rejection of unsupported operations/invalid mining.
+address filtering, partial payments to old/new addresses, repeated missed-event
+notifications, recovery of spent receipts after restart, multiple outputs without
+double counting, account subscription discovery after startup, duplicate-key
+rejection/import retry, and rejection of invalid transaction IDs returned by the
+wallet, plus unsupported operations/invalid mining.
 The separate Playwright test below covers browser UI, database address persistence
 and full invoice settlement through BTCPay's listener.
 
@@ -82,7 +89,13 @@ The flow registers an administrator, creates a store, creates its mock wallet
 account, enables ZEC with a two-confirmation settlement threshold, creates a
 0.1 ZEC invoice, and pays it through checkout cheatmode. It verifies the merchant
 status is Processing before mining, remains Processing after one block, and
-becomes Settled after the second block, then checks the customer checkout.
+becomes Settled after the second block, then checks the customer checkout. The
+suite repeats this for overpayment and partial payment followed by the remaining
+checkout amount (including the configured fee) to either the rotated or original
+address. On real regtest the first partial payment is mined before sending the
+remainder so the cashcow's change is spendable; both payments still require their
+configured confirmations. It also checks empty-key validation and duplicate viewing-key rejection
+after the original store saves its settings.
 Using a ZEC-denominated invoice avoids external exchange-rate dependencies.
 
 The browser test is opt-in: normal `dotnet test` runs the HTTP tests and reports
@@ -143,9 +156,56 @@ The HTTP tests retain their isolated mock, including synthetic-key assertions.
 Start BTCPay with `scripts/run-local.sh` once to fund the cashcow, then run
 `zcash-regtest/scripts/prepare-test-wallet.py`. This creates a separate receiver account in
 the cashcow instance and saves its seed and UFVK in ignored
-`zcash-regtest/data/local/current.env` (mode 0600). The browser runner generates a fresh receiver per real run and loads this
-file; each generated receiver also has a saved `receiver-<id>.env` file. In the local UI, paste `BTCPAY_TEST_VIEWING_KEY` into “Wallet Viewing Key”;
+`zcash-regtest/data/local/current.env` (mode 0600). The browser fixture generates a fresh receiver through GraphQL for each real test
+case. Receivers created manually by the preparation script also have a saved
+`receiver-<id>.env` file. In the local UI, paste `BTCPAY_TEST_VIEWING_KEY` into “Wallet Viewing Key”;
 the main wallet imports a watch-only account. The spending seed stays in cashcow.
 Use `zcash-regtest/scripts/regtest.sh start|stop|status` to manage the local stack.
 Starting resumes its last state; `start --state-dir <existing-run-directory>` selects
 another saved run after stopping.
+
+## Payment notification recovery and legacy migration
+
+WebSocket notifications are the low-latency path. Every ten seconds the GraphQL
+poller republishes mempool transactions and requests reconciliation, including on
+startup and at an unchanged block height. A plugin database migration adds a
+recovery cursor per cryptocurrency/account. Recovery synchronizes accounts with
+stored receivers, scans confirmed transaction history from the saved height with
+a 100-block replay overlap, and resolves receipts against all stored invoice
+addresses, including expired/settled invoices. A missing cursor scans from height
+zero. The cursor advances only after receipt processing and payment writes succeed;
+failures leave it unchanged and do not stop recovery of other accounts. PostgreSQL
+advisory locks serialize recovery across server instances. Payment identities
+(transaction ID, wallet account ID and diversifier index) make replay idempotent.
+
+The existing monitored-invoice reconciliation remains responsible for mempool
+receipts and confirmation updates. History queries retain receipts already spent
+by the merchant. This uses zkool's existing `synchronize` and
+`transactionsByAccount(height:)` operations; no zkool GraphQL schema change is
+required. It recovers after wallet downtime but is not an independent fallback
+while that wallet is unavailable. The replay overlap does not implement full
+rollback of payments removed by a chain reorganization.
+
+The mock-backed `offline-expired` browser case stops BTCPay detection, pays and
+mines while it is stopped, restarts with the wallet unavailable until the invoice
+expires, and then restores the wallet. It also injects a PostgreSQL payment-write
+failure to verify the cursor remains unchanged, checks the recovered transaction's
+account/diversifier and amount, and restarts again to check persistent, idempotent
+replay. It uses an isolated database and mock wallet even when regtest is available.
+
+New store imports persist a SHA-256 fingerprint of the trimmed viewing key rather
+than the key itself. A PostgreSQL advisory lock serializes store imports across
+server instances, and the wallet is checked for keys imported before fingerprints
+were introduced. The wallet still needs the actual viewing key for scanning. This
+prevents identical keys from being assigned to different stores; it is not a proof
+that different partial viewing keys cannot contain overlapping receiver keys.
+
+Recommended next migration step: an explicit administrator action to import the
+legacy config.json viewing key into the selected store, showing the destination
+store and original birth height before import. Reuse the duplicate-key checks,
+rescan from that birth height, and preserve the legacy config and wallet until
+verification succeeds. Importing the key alone does not migrate invoice/address
+ownership: legacy account IDs, diversifier indices and receiver-to-invoice mappings
+must also be reconciled before retiring the old backend. Starting a fresh receiving
+wallet is suitable for future invoices only; old invoice addresses still require
+monitoring. The one-time migration UI is not implemented yet.

@@ -31,10 +31,11 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
     [InlineData("overpaid")]
     [InlineData("partial-new")]
     [InlineData("partial-old")]
+    [InlineData("offline-expired")]
     [Trait("Category", "Playwright")]
     public async Task StoreInvoiceIsPaidAndSettledThroughCheatMode(string scenario)
     {
-        await using var server = await BrowserTestServer.StartAsync();
+        await using var server = await BrowserTestServer.StartAsync(forceMock: scenario == "offline-expired");
         using var playwright = await Playwright.CreateAsync();
         if (Environment.GetEnvironmentVariable("BTCPAY_PLAYWRIGHT_INSTALL") == "1")
             Assert.Equal(0, Microsoft.Playwright.Program.Main(["install", "chromium"]));
@@ -124,6 +125,12 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
                 await SubmitCheatFormAsync(page, "form#mine-block button", "/mine-blocks");
             }
             var oldAddress = await page.Locator("#Address_ZEC-CHAIN [data-clipboard]").GetAttributeAsync("data-clipboard");
+            if (scenario == "offline-expired")
+            {
+                await VerifyExpiredInvoiceRecoveryAsync(server, page, storeId, invoiceId, oldAddress!);
+                await context.Tracing.StopAsync();
+                return;
+            }
             if (scenario.StartsWith("partial")) await page.Locator("#test-payment-amount").FillAsync("0.04");
             if (scenario == "overpaid") await page.Locator("#test-payment-amount").FillAsync("0.12");
             await SubmitCheatFormAsync(page, "#FakePayment", "/test-payment");
@@ -182,6 +189,74 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
         }
     }
 
+    private static async Task VerifyExpiredInvoiceRecoveryAsync(BrowserTestServer server, IPage page,
+        string storeId, string invoiceId, string address)
+    {
+        async Task<T> Scalar<T>(string sql)
+        {
+            await using var connection = new Npgsql.NpgsqlConnection(server.DatabaseConnectionString);
+            await connection.OpenAsync();
+            await using var command = new Npgsql.NpgsqlCommand(sql, connection);
+            command.Parameters.AddWithValue("invoice", invoiceId);
+            command.Parameters.AddWithValue("address", address);
+            return (T)(await command.ExecuteScalarAsync())!;
+        }
+        async Task WaitFor(Func<Task<bool>> condition)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(60);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (await condition()) return;
+                await Task.Delay(250);
+            }
+            Assert.Fail("Recovery assertion timed out. " + server.ReadLog());
+        }
+        const string schema = "\"BTCPayServer.Plugins.ZCash\"";
+        var account = await Scalar<int>($"SELECT \"AccountIndex\" FROM {schema}.\"Receivers\" WHERE \"UnifiedAddress\" = @address");
+        var index = await Scalar<int>($"SELECT \"AddressIndex\" FROM {schema}.\"Receivers\" WHERE \"UnifiedAddress\" = @address");
+        var cursorSql = $"SELECT COALESCE((SELECT \"Height\" FROM {schema}.\"RecoveryCursors\" WHERE \"CryptoCode\" = 'ZEC' AND \"AccountIndex\" = {account}), -1)::bigint";
+        await WaitFor(async () => await Scalar<long>(cursorSql) >= 200);
+        var before = await Scalar<long>(cursorSql);
+        var link = await page.Locator("#PayInWallet").GetAttributeAsync("href");
+        var amount = link!.Split("amount=")[1].Split('&')[0];
+        await page.Locator("#ExpirySeconds").FillAsync("2");
+        await SubmitCheatFormAsync(page, "#Expire", "/expire");
+        await server.StopDetectionAsync();
+        using var wallet = new Services.ZkoolGraphQlClient(new Uri(server.CashcowUrl), new HttpClient());
+        var paid = await wallet.SendAsync("mutation($idAccount: Int!, $payment: Payment!) { pay(idAccount: $idAccount, payment: $payment) }",
+            new { idAccount = 1, payment = new { recipients = new[] { new { address, amount } } } });
+        var txid = Services.ZkoolGraphQlClient.RequireTransactionId(paid["pay"]);
+        using var http = new HttpClient();
+        using var mined = await http.PostAsync(new Uri(new Uri(server.CashcowUrl), "/rpc"),
+            new StringContent("{\"method\":\"generate\",\"params\":[2]}", System.Text.Encoding.UTF8, "application/json"));
+        mined.EnsureSuccessStatusCode();
+        await Task.Delay(2500);
+        // BTCPay gives listeners a two-minute startup grace period before expiring invoices.
+        // Keep the wallet unavailable until that period ends and the invoice expires.
+        await server.SetMockWalletAvailableAsync(false);
+        await server.RestartDetectionAsync();
+        await AssertInvoiceStatusAsync(page, storeId, invoiceId, "Expired", timeoutSeconds: 180);
+        Assert.Equal(0L, await Scalar<long>("SELECT COUNT(*) FROM \"Payments\" WHERE \"InvoiceDataId\" = @invoice"));
+        Assert.Equal(before, await Scalar<long>(cursorSql));
+        // A DB write failure must leave the cursor unchanged. This database is isolated per case.
+        await Scalar<object>("CREATE FUNCTION reject_recovery_payment() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''test payment persistence failure''; END'; CREATE TRIGGER reject_recovery_payment BEFORE INSERT ON \"Payments\" FOR EACH ROW EXECUTE FUNCTION reject_recovery_payment(); SELECT 1;");
+        await server.SetMockWalletAvailableAsync(true);
+        await WaitFor(() => Task.FromResult(server.ReadLog().Contains("Could not persist Zcash payment")));
+        Assert.Equal(before, await Scalar<long>(cursorSql));
+        await Scalar<object>("DROP TRIGGER reject_recovery_payment ON \"Payments\"; DROP FUNCTION reject_recovery_payment(); SELECT 1;");
+        await WaitFor(async () => await Scalar<long>(cursorSql) == 202);
+        Assert.Equal(1L, await Scalar<long>("SELECT COUNT(*) FROM \"Payments\" WHERE \"InvoiceDataId\" = @invoice"));
+        Assert.Equal($"{txid}#{account}#{index}", await Scalar<string>("SELECT \"Id\" FROM \"Payments\" WHERE \"InvoiceDataId\" = @invoice"));
+        Assert.Equal(decimal.Parse(amount, System.Globalization.CultureInfo.InvariantCulture),
+            await Scalar<decimal>("SELECT \"Amount\" FROM \"Payments\" WHERE \"InvoiceDataId\" = @invoice"));
+        // The persistent cursor survives another restart; forced inclusive replay remains idempotent.
+        await server.RestartDetectionAsync();
+        await WaitFor(() => Task.FromResult(server.ReadLog().Contains("Account " + account)));
+        await Task.Delay(11000);
+        Assert.Equal(202L, await Scalar<long>(cursorSql));
+        Assert.Equal(1L, await Scalar<long>("SELECT COUNT(*) FROM \"Payments\" WHERE \"InvoiceDataId\" = @invoice"));
+    }
+
     private static async Task SubmitCheatFormAsync(IPage page, string selector, string action)
     {
         var response = await page.RunAndWaitForResponseAsync(
@@ -203,9 +278,9 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
         Assert.Fail($"Invoice {invoiceId} did not show {expected} confirmations.");
     }
 
-    private static async Task AssertInvoiceStatusAsync(IPage page, string storeId, string invoiceId, string status)
+    private static async Task AssertInvoiceStatusAsync(IPage page, string storeId, string invoiceId, string status, int timeoutSeconds = 60)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(60);
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
         string last = "";
         do
         {
