@@ -62,7 +62,7 @@ You will need to create this file:
 
 ```json
 {
-  "DEBUG_PLUGINS": "/<absolute-path-to-repo>/btcpayserver-zcash-plugin/Plugins/ZCash/bin/Debug/net8.0/BTCPayServer.Plugins.ZCash.dll",
+  "DEBUG_PLUGINS": "/<absolute-path-to-repo>/btcpayserver-zcash-plugin/Plugins/ZCash/bin/Debug/net10.0/BTCPayServer.Plugins.ZCash.dll",
   "ZEC_DAEMON_URI": "http://127.0.0.1:8001",
   "ZEC_WALLET_DAEMON_URI": "http://127.0.0.1:8001",
   "ZEC_WALLET_DAEMON_WALLETDIR": "/<absolute-path-to-repo>/btcpayserver-zcash-plugin/dev/wallet_datadir",

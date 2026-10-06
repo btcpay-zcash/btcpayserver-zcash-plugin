@@ -44,18 +44,20 @@ namespace BTCPayServer.Plugins.ZCash.Payments
         {
             context.Prompt.Currency = _network.CryptoCode;
             context.Prompt.Divisibility = _network.Divisibility;
-            if (context.Prompt.Activated && IsReady())
+            var config = ParsePaymentMethodConfig(context.PaymentMethodConfig);
+            if (context.Prompt.Activated && IsReady() && config.AccountIndex is { } accountIndex)
             {
-                var walletClient = _ZcashRpcProvider.WalletRpcClients[_network.CryptoCode];
-                var daemonClient = _ZcashRpcProvider.DaemonRpcClients[_network.CryptoCode];
-                var config = ParsePaymentMethodConfig(context.PaymentMethodConfig);
+                var walletBackend = _ZcashRpcProvider.WalletBackends[_network.CryptoCode];
+                // var walletClient = _ZcashRpcProvider.WalletRpcClients[_network.CryptoCode];
+                // var daemonClient = _ZcashRpcProvider.DaemonRpcClients[_network.CryptoCode];
+                
                 try
                 {
                     context.State = new Prepare()
                     {
-                        GetFeeRate = daemonClient.SendCommandAsync<GetFeeEstimateRequest, GetFeeEstimateResponse>("get_fee_estimate", new GetFeeEstimateRequest()),
-                        ReserveAddress = s => walletClient.SendCommandAsync<CreateAddressRequest, CreateAddressResponse>("create_address", new CreateAddressRequest() { Label = $"btcpay invoice #{s}", AccountIndex = config.AccountIndex }),
-                        AccountIndex = config.AccountIndex
+                        GetFeeRate = walletBackend.GetFeeEstimateAsync(accountIndex),
+                        ReserveAddress = s => walletBackend.CreateAddressAsync(accountIndex, $"btcpay invoice #{s}"),
+                        AccountIndex = accountIndex
                     };
                 }
                 catch (Exception ex)
@@ -74,7 +76,7 @@ namespace BTCPayServer.Plugins.ZCash.Payments
             var feeRatePerKb = await ZcashPrepare.GetFeeRate;
             var address = await ZcashPrepare.ReserveAddress(invoice.Id);
 
-            var feeRatePerByte = feeRatePerKb.Fee / 1024;
+            var feeRatePerByte = feeRatePerKb.FeePerKb / 1024;
 
             context.Prompt.Destination = address.Address;
             context.Prompt.PaymentMethodFee = ZcashMoney.Convert(feeRatePerByte * 100);
@@ -109,8 +111,8 @@ namespace BTCPayServer.Plugins.ZCash.Payments
 
         class Prepare
         {
-            public Task<GetFeeEstimateResponse> GetFeeRate;
-            public Func<string, Task<CreateAddressResponse>> ReserveAddress;
+            public Task<WalletFeeEstimate> GetFeeRate;
+            public Func<string, Task<WalletAddress>> ReserveAddress;
             public long AccountIndex { get; internal set; }
         }
 
