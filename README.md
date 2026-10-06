@@ -1,4 +1,4 @@
-# ZCash support plugin
+# Zcash support plugin
 
 This plugin extends BTCPayServer to enable users to receive payments via Zcash.
 
