@@ -7,6 +7,10 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
+using BTCPayServer.Plugins.ZCash.Data;
+using Microsoft.EntityFrameworkCore;
 using System.Text.Json.Nodes;
 using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Abstractions.Extensions;
@@ -42,17 +46,19 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
         private readonly ZcashRPCProvider _ZcashRpcProvider;
         private readonly PaymentMethodHandlerDictionary _handlers;
         private IStringLocalizer StringLocalizer { get; }
+        private readonly ZcashPluginDbContextFactory _dbContextFactory;
 
         public UIZcashLikeStoreController(ZcashLikeConfiguration ZcashLikeConfiguration,
             StoreRepository storeRepository, ZcashRPCProvider ZcashRpcProvider,
             PaymentMethodHandlerDictionary handlers,
-            IStringLocalizer stringLocalizer)
+            IStringLocalizer stringLocalizer, ZcashPluginDbContextFactory dbContextFactory)
         {
             _ZcashLikeConfiguration = ZcashLikeConfiguration;
             _StoreRepository = storeRepository;
             _ZcashRpcProvider = ZcashRpcProvider;
             _handlers = handlers;
             StringLocalizer = stringLocalizer;
+            _dbContextFactory = dbContextFactory;
         }
 
         public StoreData StoreData => HttpContext.GetStoreData();
@@ -209,38 +215,60 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                     ModelState.AddModelError(nameof(viewModel.WalletPassword),
                         StringLocalizer["A viewing key is required."]);
 
-                try
+                if (ModelState.IsValid)
                 {
-                    var existingAccounts = await GetAccounts(cryptoCode) ?? Array.Empty<WalletAccount>();
-                    var newAccount = await _ZcashRpcProvider.WalletBackends[cryptoCode]
-                        .CreateAccountAsync(new WalletAccountCreationRequest
+                    try
+                    {
+                        var key = viewModel.WalletPassword.Trim();
+                        var keyHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key)));
+                        // Serialize imports across requests and server instances sharing this database.
+                        await using var db = _dbContextFactory.CreateContext();
+                        await using var importLock = await db.Database.BeginTransactionAsync();
+                        await db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(802469320125)");
+                        var stores = await _StoreRepository.GetStores();
+                        foreach (var existingStore in stores)
                         {
-                            Key = viewModel.WalletPassword,
-                            BirthHeight = viewModel.BirthHeight,
-                            Label = $"store:{StoreData.Id}",
-                            // AccountIndex = existingAccounts.Any() ? existingAccounts.Max(account => account.AccountIndex) + 1 : 1
+                            var existing = existingStore.GetPaymentMethodConfig<ZcashPaymentMethodConfig>(pmi, _handlers);
+                            if (existingStore.Id == store.Id && existing?.AccountIndex != null)
+                                throw new InvalidOperationException("This store already has an account configured.");
+                            var existingHash = existing?.ViewingKeyHash;
+                            if (existingHash == null && !string.IsNullOrWhiteSpace(existing?.ViewingKey))
+                                existingHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(existing.ViewingKey.Trim())));
+                            if (existingHash == keyHash)
+                                throw new InvalidOperationException("This viewing key is already assigned to a store. Use a different viewing key.");
+                        }
+                        var newAccount = await _ZcashRpcProvider.WalletBackends[cryptoCode]
+                            .CreateAccountAsync(new WalletAccountCreationRequest
+                            {
+                                Key = key,
+                                BirthHeight = viewModel.BirthHeight,
+                                Label = $"store:{StoreData.Id}"
+                            });
+                        // Backend retries recover the account by key and store label if this save fails.
+                        config.AccountIndex = newAccount.AccountIndex;
+                        config.ViewingKeyHash = keyHash;
+                        config.ViewingKey = null;
+                        config.BirthHeight = viewModel.BirthHeight;
+                        store.SetPaymentMethodConfig(_handlers[pmi], config);
+                        await _StoreRepository.UpdateStore(store);
+                        await importLock.CommitAsync();
+                        TempData.SetStatusMessageModel(new StatusMessageModel
+                        {
+                            Severity = StatusMessageModel.StatusSeverity.Success,
+                            Message = StringLocalizer["Account #{0} created for this store.",
+                                newAccount.AccountIndex].Value
                         });
-
-                    // Persist immediately so the account is never orphaned
-                    // var store = StoreData;
-                    store.SetPaymentMethodConfig(_handlers[pmi], new ZcashPaymentMethodConfig
+                        return RedirectToAction(nameof(GetStoreZcashLikePaymentMethod),
+                            new { storeId = StoreData.Id, cryptoCode });
+                    }
+                    catch (InvalidOperationException ex)
                     {
-                        AccountIndex = newAccount.AccountIndex
-                    });
-                    await _StoreRepository.UpdateStore(store);
-
-                    TempData.SetStatusMessageModel(new StatusMessageModel
+                        ModelState.AddModelError(nameof(viewModel.WalletPassword), ex.Message);
+                    }
+                    catch (Exception)
                     {
-                        Severity = StatusMessageModel.StatusSeverity.Success,
-                        Message = StringLocalizer["Account #{0} created for this store.",
-                            newAccount.AccountIndex].Value
-                    });
-                    return RedirectToAction(nameof(GetStoreZcashLikePaymentMethod),
-                        new { storeId = StoreData.Id, cryptoCode });
-                }
-                catch (Exception)
-                {
-                    ModelState.AddModelError(nameof(viewModel.AccountIndex), StringLocalizer["Could not create a new account."]);
+                        ModelState.AddModelError(nameof(viewModel.WalletPassword), StringLocalizer["Could not create a new account."]);
+                    }
                 }
 
             }
@@ -249,11 +277,6 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             {
                 ModelState.AddModelError(nameof(viewModel.AccountIndex), 
                     "An account must be created before enabling this payment method.");
-            }
-            else if (config.AccountIndex is null && viewModel.Enabled)
-            {
-                ModelState.AddModelError(nameof(viewModel.AccountIndex), 
-                    "Account doesn't exist. Please create an account.");
             }
 
             if (!ModelState.IsValid)
@@ -273,9 +296,12 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
 
             var storeData = StoreData;
             var blob = storeData.GetStoreBlob();
-            storeData.SetPaymentMethodConfig(_handlers[PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode)], new ZcashPaymentPromptDetails()
+            storeData.SetPaymentMethodConfig(_handlers[PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode)], new ZcashPaymentMethodConfig()
             {
-                AccountIndex = config.AccountIndex ?? 0,
+                AccountIndex = config.AccountIndex,
+                ViewingKeyHash = config.ViewingKeyHash,
+                ViewingKey = config.ViewingKey, // Preserve legacy keys until an explicit successful import.
+                BirthHeight = config.BirthHeight,
                 InvoiceSettledConfirmationThreshold = viewModel.SettlementConfirmationThresholdChoice switch
                 {
                     ZcashLikeSettlementThresholdChoice.ZeroConfirmation => 0,
@@ -340,7 +366,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                 }
             }
 
-            blob.SetExcluded(PaymentTypes.CHAIN.GetPaymentMethodId(viewModel.CryptoCode), !viewModel.Enabled);
+            blob.SetExcluded(pmi, !viewModel.Enabled);
             storeData.SetStoreBlob(blob);
             await _StoreRepository.UpdateStore(storeData);
             TempData.SetStatusMessageModel(new StatusMessageModel
@@ -392,6 +418,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             public IEnumerable<SelectListItem> Accounts { get; set; }
             public bool UsesWalletFile { get; set; }
             public bool WalletFileFound { get; set; }
+            [Range(0, int.MaxValue)]
             [Display(Name = "Birth Height")]
             public long? BirthHeight { get; set; }
             [Display(Name = "Wallet Viewing Key")]

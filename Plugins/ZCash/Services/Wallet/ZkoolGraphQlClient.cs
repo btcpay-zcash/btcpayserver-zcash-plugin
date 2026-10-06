@@ -60,6 +60,14 @@ namespace BTCPayServer.Plugins.ZCash.Services
             return response.Data ?? new JObject();
         }
 
+        public static string RequireTransactionId(JToken token)
+        {
+            var txid = token?.Value<string>();
+            if (txid == null || txid.Length != 64 || !txid.All(Uri.IsHexDigit))
+                throw new InvalidOperationException("The wallet did not return a valid transaction ID. The payment may have been rejected; check wallet status before retrying.");
+            return txid;
+        }
+
         public IObservable<GraphQLResponse<JObject>> CreateSubscriptionStream(GraphQLRequest request, Action<Exception> webSocketExceptionHandler)
             => _client.CreateSubscriptionStream<JObject>(request, webSocketExceptionHandler);
 

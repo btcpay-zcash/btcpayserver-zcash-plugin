@@ -24,7 +24,6 @@ namespace BTCPayServer.Plugins.ZCash.Services
         private readonly BTCPayServerEnvironment environment;
         private readonly SemaphoreSlim _pollingLock = new SemaphoreSlim(1, 1);
         private long? _lastKnownHeight;
-        private Dictionary<long, HashSet<string>> _knownUnconfirmedByAccount = new Dictionary<long, HashSet<string>>();
         private readonly ZcashPluginDbContextFactory _dbContextFactory;
         // private readonly ILogger<ZkoolGraphQlBackend> _logger;
         
@@ -109,8 +108,15 @@ query {
 
         public async Task<WalletAccountCreationResult> CreateAccountAsync(WalletAccountCreationRequest request, CancellationToken cancellationToken = default)
         {
-            var accounts = await GetAccountsAsync(cancellationToken);
-            // var requestedAccountIndex = request.AccountIndex ?? (accounts.Any() ? accounts.Max(account => account.AccountIndex) + 1 : 0);
+            var existing = await _graphQlClient.SendAsync("query { accounts { id name ufvk } }", cancellationToken: cancellationToken);
+            var matching = existing["accounts"]?.FirstOrDefault(a => a["ufvk"]?.Value<string>() == request.Key?.Trim());
+            if (matching != null)
+            {
+                if (matching["name"]?.Value<string>() != request.Label)
+                    throw new InvalidOperationException("This viewing key is already imported by another account. Use a different viewing key.");
+                // Recover an import whose store save failed without creating another wallet account.
+                return new WalletAccountCreationResult { AccountIndex = matching["id"]!.Value<long>() };
+            }
 
             var data = await _graphQlClient.SendAsync(@"
 mutation($newAccount: NewAccount!) {
@@ -195,21 +201,25 @@ query($idAccount: Int!) {
             var accountId = await ResolveGraphQlAccountIdAsync(accountIndex, cancellationToken);
             var currentHeight = await GetCurrentHeightAsync(cancellationToken);
 
+            // notesByAccount contains only unspent notes. Invoice recovery needs receipts
+            // even after the merchant spends them, as well as transactions still in the mempool.
             var data = await _graphQlClient.SendAsync(@"
-query($idAccount: Int!, $diversifierIndices: [BigDecimal!]) {
-  notesByAccount(idAccount: $idAccount, diversifierIndices: $diversifierIndices) {
-    id
-    value
-    address
-    diversifierIndex
-    tx {
-      txid
-      height
-    }
+query($idAccount: Int!) {
+  transactionsByAccount(idAccount: $idAccount) {
+    txid height notes { value address diversifierIndex }
   }
-}", new { idAccount = accountId, diversifierIndices = addressIndices }, cancellationToken);
-
-            return FlattenNotesAsTransfers(accountIndex, currentHeight, data["notesByAccount"]);
+  unconfirmedByAccount(idAccount: $idAccount) {
+    txid notes { value address diversifierIndex }
+  }
+}", new { idAccount = accountId }, cancellationToken);
+            var confirmed = data["transactionsByAccount"]?.SelectMany(tx => FlattenTransactionNotes(accountIndex, currentHeight, tx))
+                ?? Enumerable.Empty<WalletTransfer>();
+            var unconfirmed = data["unconfirmedByAccount"]?.SelectMany(tx => FlattenUnconfirmedNotes(accountIndex, tx))
+                ?? Enumerable.Empty<WalletTransfer>();
+            return confirmed.Concat(unconfirmed)
+                .Where(t => addressIndices == null || addressIndices.Contains(t.AddressIndex))
+                .GroupBy(t => (t.TransactionId, t.AccountIndex, t.AddressIndex, t.Address))
+                .Select(g => g.OrderByDescending(t => t.Height).First()).ToList();
         }
 
         public async Task<WalletTransaction> GetTransactionAsync(long accountIndex, string transactionId, CancellationToken cancellationToken = default)
@@ -233,7 +243,7 @@ query($idAccount: Int!, $txid: String!) {
 }", new { idAccount = accountId, txid = transactionId }, cancellationToken);
 
                 var transaction = data["transactionById"];
-                if (transaction != null)
+                if (transaction is JObject)
                 {
                     var height = transaction["height"]?.Value<long>() ?? 0;
                     return new WalletTransaction
@@ -297,7 +307,9 @@ query($idAccount: Int!, $minHeight: Int) {
   }
 }", new { idAccount = accountId, minHeight }, cancellationToken);
 
-            return FlattenNotesAsTransfers(accountIndex, currentHeight, data["transactionsByAccount"]);
+            return data["transactionsByAccount"]?.SelectMany(tx => FlattenTransactionNotes(accountIndex, currentHeight, tx))
+                .Where(t => diversifierIndices == null || diversifierIndices.Contains(t.AddressIndex)).ToList()
+                ?? new List<WalletTransfer>();
         }
 
         public async Task<WalletPreparedPayment> PreparePaymentAsync(long accountIndex, WalletPaymentRequest request, CancellationToken cancellationToken = default)
@@ -333,7 +345,7 @@ mutation($idAccount: Int!, $payment: Payment!) {
 
             return new WalletSentPayment
             {
-                TransactionId = data["pay"]?.Value<string>()
+                TransactionId = ZkoolGraphQlClient.RequireTransactionId(data["pay"])
             };
         }
 
@@ -346,23 +358,17 @@ mutation($idAccount: Int!, $payment: Payment!) {
                 var currentHeight = await GetCurrentHeightAsync(cancellationToken);
                 var accounts = await GetAccountsAsync(cancellationToken);
 
-                if (_lastKnownHeight is null)
+                // Reconcile every poll, including startup and unchanged/reorg heights.
+                // Listener writes are idempotent, so a dropped event or failed handler is retried.
+                events.Add(new ZcashEvent
                 {
-                    _lastKnownHeight = currentHeight;
-                }
-                else if (currentHeight > _lastKnownHeight.Value)
-                {
-                    // Polling unconfirmed transactions plus synthetic block events keeps the listener backend-agnostic
-                    // without introducing a websocket subscription dependency for the first GraphQL implementation.
-                    events.Add(new ZcashEvent
-                    {
-                        CryptoCode = CryptoCode,
-                        BlockHash = currentHeight.ToString(CultureInfo.InvariantCulture)
-                    });
-                    _lastKnownHeight = currentHeight;
-                }
+                    CryptoCode = CryptoCode,
+                    Reconcile = true,
+                    BlockHash = _lastKnownHeight.HasValue && _lastKnownHeight != currentHeight
+                        ? currentHeight.ToString(CultureInfo.InvariantCulture) : null
+                });
+                _lastKnownHeight = currentHeight;
 
-                var nextKnown = new Dictionary<long, HashSet<string>>();
                 foreach (var account in accounts)
                 {
                     var accountId = await ResolveGraphQlAccountIdAsync(account.AccountIndex, cancellationToken);
@@ -379,13 +385,9 @@ query($idAccount: Int!) {
                                    .ToHashSet(StringComparer.OrdinalIgnoreCase)
                                ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                    nextKnown[account.AccountIndex] = seen;
-                    // A newly created account can receive payment before its first poll.
-                    // Treat it as having no previously seen transactions so that payment is discovered.
-                    _knownUnconfirmedByAccount.TryGetValue(account.AccountIndex, out var previous);
-                    previous ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-                    foreach (var txid in seen.Where(txid => !previous.Contains(txid)))
+                    // Notify again until confirmed: publishing once is not an acknowledgement
+                    // that the listener persisted the receipt.
+                    foreach (var txid in seen)
                     {
                         events.Add(new ZcashEvent
                         {
@@ -396,7 +398,6 @@ query($idAccount: Int!) {
                     }
                 }
 
-                _knownUnconfirmedByAccount = nextKnown;
                 return events;
             }
             finally
@@ -477,7 +478,7 @@ mutation($idAccount: Int!) {
             ctx.Receivers.Add(new ZcashReceiver
             {
                 AccountIndex = (int)accountId,
-                AddressIndex = ((int) addresses.AddressIndex),
+                AddressIndex = checked((int)addresses.AddressIndex),
                 UnifiedAddress = addresses.UnifiedAddress,
                 TransparentAddress = addresses.TransparentAddress,
                 SaplingAddress = addresses.SaplingAddress,
@@ -516,26 +517,6 @@ mutation($idAccount: Int!) {
                    ?? token?["transparent"]?.Value<string>();
         }
         
-        private static WalletTransfer NoteToTransfer(long accountIndex, long currentHeight, JToken note)
-        {
-            var tx = note["tx"];
-            var heightToken = tx?["height"];
-            var height = heightToken?.Value<long>() ?? 0;
-            var isConfirmed = height > 0;
-
-            return new WalletTransfer
-            {
-                AccountIndex = accountIndex,
-                Address = note["address"]?.Value<string>(),
-                Amount = ToAtomicUnits(note["value"]),
-                AddressIndex = ToLong(note["diversifierIndex"]),
-                Height = height,
-                Confirmations = isConfirmed ? currentHeight - height + 1 : 0,
-                TransactionId = tx?["txid"]?.Value<string>(),
-            };
-        }
-
-
         private static List<WalletTransfer> FlattenTransactionNotes(long accountIndex, long currentHeight, JToken transaction)
         {
             return GroupTransfers(accountIndex,
@@ -562,17 +543,6 @@ mutation($idAccount: Int!) {
                 transaction?["txid"]?.Value<string>(),
                 0,
                 0);
-        }
-
-        private static IReadOnlyList<WalletTransfer> FlattenNotesAsTransfers(
-            long accountIndex,
-            long currentHeight,
-            JToken notes)
-        {
-            return notes?.Children()
-                       .Select(note => NoteToTransfer(accountIndex, currentHeight, note))
-                       .ToList()
-                   ?? new List<WalletTransfer>();
         }
 
         private static List<WalletTransfer> GroupTransfers(long accountIndex, IEnumerable<GraphQlTransferNote> notes, string transactionId, long height, long currentHeight)
@@ -659,20 +629,43 @@ mutation($idAccount: Int!) {
         /// </summary>
         public async Task StartSubscriptionLoopAsync(EventAggregator eventAggregator, ILogger logger, CancellationToken cancellationToken)
         {
+            using var loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var subscriptions = new Dictionary<long, (CancellationTokenSource Cts, Task Task)>();
             try
             {
-                var accounts = await GetAccountsAsync(cancellationToken);
-                var tasks = accounts.Select(async account =>
+                while (!cancellationToken.IsCancellationRequested)
                 {
-                    var accountId = await ResolveGraphQlAccountIdAsync(account.AccountIndex, cancellationToken);
-                    await RunAccountSubscriptionAsync(accountId, account.AccountIndex, eventAggregator, logger, cancellationToken);
-                }).ToList();
-                await Task.WhenAll(tasks);
+                    try
+                    {
+                        var accounts = await GetAccountsAsync(cancellationToken);
+                        var ids = accounts.Select(a => a.AccountIndex).ToHashSet();
+                        foreach (var id in subscriptions.Keys.Where(id => !ids.Contains(id)).ToList())
+                        {
+                            var old = subscriptions[id];
+                            old.Cts.Cancel();
+                            await old.Task;
+                            old.Cts.Dispose();
+                            subscriptions.Remove(id);
+                        }
+                        foreach (var id in ids.Where(id => !subscriptions.ContainsKey(id)))
+                        {
+                            var cts = CancellationTokenSource.CreateLinkedTokenSource(loopCts.Token);
+                            subscriptions.Add(id, (cts, RunAccountSubscriptionAsync(id, id, eventAggregator, logger, cts.Token)));
+                        }
+                    }
+                    catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        logger?.LogWarning(ex, "[{CryptoCode}] Failed to refresh GraphQL event subscriptions", CryptoCode);
+                    }
+                    await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
-            catch (Exception ex)
+            finally
             {
-                logger?.LogError(ex, "[{CryptoCode}] Failed to start GraphQL event subscriptions", CryptoCode);
+                loopCts.Cancel();
+                await Task.WhenAll(subscriptions.Values.Select(s => s.Task));
+                foreach (var subscription in subscriptions.Values) subscription.Cts.Dispose();
             }
         }
 
@@ -687,7 +680,7 @@ mutation($idAccount: Int!) {
                     Variables = new { idAccount = (int)accountId }
                 };
 
-                var tcs = new TaskCompletionSource();
+                var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 using var subscriptionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
                 void WebSocketExceptionHandler(Exception ex)
@@ -704,15 +697,17 @@ mutation($idAccount: Int!) {
                         .Subscribe(
                             response =>
                             {
-                                Console.WriteLine($"[ZEC RAW] {response.Data?.ToString()}");
+                                if (response.Errors?.Any() == true)
+                                {
+                                    Interlocked.Increment(ref errorCount);
+                                    tcs.TrySetResult();
+                                    return;
+                                }
+                                Interlocked.Exchange(ref errorCount, 0);
                                 var evt = MapSubscriptionEvent(response, accountIndex);
                                 if (evt != null)
                                 {
-                                    Console.WriteLine($"[ZEC MAPPED] Type={evt.GetType().Name} Tx={evt.TransactionHash} Block={evt.BlockHash}");
                                     eventAggregator.Publish(evt);
-                                } else
-                                {
-                                  Console.WriteLine("[ZEC MAPPED] null (dropped)");
                                 }
                             },
                             _ =>
@@ -752,7 +747,6 @@ mutation($idAccount: Int!) {
             var height = evt["height"]?.Value<long>() ?? 0;
             var txid = evt["txid"]?.Value<string>();
 
-            Console.WriteLine($"[ZEC] type='{type}' CryptoCode={CryptoCode} txid='{txid}'");
 
 
             return type switch

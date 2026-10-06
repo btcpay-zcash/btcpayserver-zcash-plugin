@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using BTCPayServer.Logging;
 using BTCPayServer.Plugins.ZCash.Configuration;
@@ -16,6 +17,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
         private readonly EventAggregator _eventAggregator;
         private readonly Logs _logs;
         private CancellationTokenSource _cts;
+        private readonly List<Task> _loops = new();
 
         public ZcashWalletEventHostedService(ZcashLikeConfiguration zcashLikeConfiguration,
             ZcashRPCProvider zcashRpcProvider,
@@ -33,7 +35,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             foreach (var item in _zcashLikeConfiguration.ZcashLikeConfigurationItems)
             {
-                _ = StartLoop(item.Key, _cts.Token);
+                _loops.Add(StartLoop(item.Key, _cts.Token));
             }
 
             return Task.CompletedTask;
@@ -44,7 +46,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             if (_zcashRpcProvider.WalletBackends.TryGetValue(cryptoCode, out var backend)
                 && backend is ZkoolGraphQlBackend zkoolBackend)
             {
-                _ = zkoolBackend.StartSubscriptionLoopAsync(_eventAggregator, _logs.PayServer, cancellationToken);
+                _loops.Add(zkoolBackend.StartSubscriptionLoopAsync(_eventAggregator, _logs.PayServer, cancellationToken));
             }
 
             try
@@ -75,10 +77,11 @@ namespace BTCPayServer.Plugins.ZCash.Services
             }
         }
 
-        public Task StopAsync(CancellationToken cancellationToken)
+        public async Task StopAsync(CancellationToken cancellationToken)
         {
             _cts?.Cancel();
-            return Task.CompletedTask;
+            await Task.WhenAll(_loops).WaitAsync(cancellationToken);
+            _cts?.Dispose();
         }
     }
 }
