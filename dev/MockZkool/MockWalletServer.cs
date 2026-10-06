@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json.Nodes;
 
@@ -12,6 +13,8 @@ public static class MockWalletServer
         var builder = WebApplication.CreateBuilder(args);
         var app = builder.Build();
         var wallet = new MockWallet();
+        var subscriptions = new ConcurrentDictionary<string, int>();
+        app.MapGet("/test/subscriptions", () => subscriptions.Values.Order().ToArray());
         app.MapGet("/health", () => Results.Ok(new { mock = true }));
         app.MapPost("/graphql", async (HttpContext context) =>
         {
@@ -38,6 +41,7 @@ public static class MockWalletServer
             if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; return; }
             using var socket = await context.WebSockets.AcceptWebSocketAsync("graphql-transport-ws");
             var buffer = new byte[16384];
+            var owned = new List<string>();
             try
             {
                 while (socket.State == WebSocketState.Open)
@@ -46,12 +50,19 @@ public static class MockWalletServer
                     if (message.MessageType == WebSocketMessageType.Close) break;
                     var payload = JsonNode.Parse(Encoding.UTF8.GetString(buffer, 0, message.Count));
                     var type = payload?["type"]?.GetValue<string>();
+                    if (type == "subscribe")
+                    {
+                        var subscriptionId = Guid.NewGuid().ToString();
+                        owned.Add(subscriptionId);
+                        subscriptions[subscriptionId] = payload!["payload"]!["variables"]!["idAccount"]!.GetValue<int>();
+                    }
                     if (type is "connection_init" or "ping")
                         await socket.SendAsync(Encoding.UTF8.GetBytes(type == "ping" ? "{\"type\":\"pong\"}" : "{\"type\":\"connection_ack\"}"), WebSocketMessageType.Text, true, context.RequestAborted);
                 }
             }
             catch (OperationCanceledException) { }
             catch (WebSocketException) { }
+            finally { foreach (var id in owned) subscriptions.TryRemove(id, out _); }
         });
         return app;
     }
@@ -93,7 +104,7 @@ internal sealed class MockWallet
             if (q.Contains("createAccount"))
             {
                 var account = nextAccount++;
-                accounts.Add(new() { ["id"] = account, ["name"] = v["newAccount"]?["name"]?.DeepClone(), ["aindex"] = account - 1, ["height"] = height, ["balance"] = 0m });
+                accounts.Add(new() { ["id"] = account, ["name"] = v["newAccount"]?["name"]?.DeepClone(), ["ufvk"] = v["newAccount"]?["key"]?.DeepClone(), ["aindex"] = account - 1, ["height"] = height, ["balance"] = 0m });
                 return Result("createAccount", JsonValue.Create(account));
             }
             if (q.Contains("newAddresses"))
@@ -119,17 +130,36 @@ internal sealed class MockWallet
                     if (!addresses.TryGetValue(address, out var receiver)) throw new ArgumentException("Unknown mock destination");
                     var amount = decimal.Parse(recipient["amount"]!.ToString(), System.Globalization.CultureInfo.InvariantCulture);
                     if (amount <= 0) throw new ArgumentException("Amount must be positive");
-                    transactions.Add((receiver.Account, new JsonObject { ["txid"] = txid, ["height"] = 0L, ["notes"] = new JsonArray(new JsonObject { ["value"] = amount, ["address"] = address, ["diversifierIndex"] = receiver.Index }) }));
+                    var tx = transactions.FirstOrDefault(t => t.Account == receiver.Account && t.Tx["txid"]!.GetValue<string>() == txid).Tx;
+                    if (tx == null)
+                    {
+                        tx = new JsonObject { ["txid"] = txid, ["height"] = 0L, ["notes"] = new JsonArray() };
+                        transactions.Add((receiver.Account, tx));
+                    }
+                    tx["notes"]!.AsArray().Add(new JsonObject { ["value"] = amount, ["address"] = address, ["diversifierIndex"] = receiver.Index });
                 }
                 return Result("pay", JsonValue.Create(txid));
             }
             var txs = transactions.Where(t => t.Account == id).Select(t => t.Tx).ToList();
             if (q.Contains("transactionById")) return Result("transactionById", txs.FirstOrDefault(t => t["txid"]!.GetValue<string>() == v["txid"]?.GetValue<string>())?.DeepClone());
+            if (q.Contains("transactionsByAccount") && q.Contains("unconfirmedByAccount"))
+                return new JsonObject
+                {
+                    ["transactionsByAccount"] = new JsonArray(txs.Where(t => t["height"]!.GetValue<long>() > 0).Select(t => t.DeepClone()).ToArray()),
+                    ["unconfirmedByAccount"] = new JsonArray(txs.Where(t => t["height"]!.GetValue<long>() == 0).Select(t => t.DeepClone()).ToArray())
+                };
             if (q.Contains("unconfirmedByAccount")) return Result("unconfirmedByAccount", new JsonArray(txs.Where(t => t["height"]!.GetValue<long>() == 0).Select(t => t.DeepClone()).ToArray()));
+            if (q.Contains("transactionsByAccount"))
+                return Result("transactionsByAccount", new JsonArray(txs.Where(t => t["height"]!.GetValue<long>() >= (v["minHeight"]?.GetValue<long>() ?? 0)).Select(t => t.DeepClone()).ToArray()));
+            if (q.Contains("mockSpendNotes"))
+            {
+                foreach (var tx in txs) tx["spent"] = true;
+                return Result("mockSpendNotes", JsonValue.Create(true));
+            }
             if (q.Contains("notesByAccount"))
             {
                 var indices = v["diversifierIndices"]?.AsArray().Select(n => long.Parse(n!.ToString())).ToHashSet();
-                return Result("notesByAccount", new JsonArray(txs.Where(t => t["height"]!.GetValue<long>() > 0).SelectMany(t => t["notes"]!.AsArray().Select(n => { var note = n!.DeepClone(); note["tx"] = new JsonObject { ["txid"] = t["txid"]!.DeepClone(), ["height"] = t["height"]!.DeepClone() }; return note; })).Where(n => indices == null || indices.Contains(n["diversifierIndex"]!.GetValue<int>())).ToArray()));
+                return Result("notesByAccount", new JsonArray(txs.Where(t => t["height"]!.GetValue<long>() > 0 && t["spent"]?.GetValue<bool>() != true).SelectMany(t => t["notes"]!.AsArray().Select(n => { var note = n!.DeepClone(); note["tx"] = new JsonObject { ["txid"] = t["txid"]!.DeepClone(), ["height"] = t["height"]!.DeepClone() }; return note; })).Where(n => indices == null || indices.Contains(n["diversifierIndex"]!.GetValue<int>())).ToArray()));
             }
             if (q.Contains("balanceByAccount")) return Result("balanceByAccount", new JsonObject { ["height"] = height, ["total"] = txs.Sum(t => t["notes"]!.AsArray().Sum(n => n!["value"]!.GetValue<decimal>())), ["transparent"] = 0m, ["sapling"] = 0m, ["orchard"] = 0m });
             throw new ArgumentException("Unsupported mock GraphQL operation");

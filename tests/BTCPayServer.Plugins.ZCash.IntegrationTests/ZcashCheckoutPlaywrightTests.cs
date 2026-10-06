@@ -1,3 +1,4 @@
+using Newtonsoft.Json.Linq;
 using Microsoft.Playwright;
 using Xunit;
 using Xunit.Abstractions;
@@ -14,11 +15,24 @@ public sealed class LocalBrowserFactAttribute : FactAttribute
     }
 }
 
+public sealed class LocalBrowserTheoryAttribute : TheoryAttribute
+{
+    public LocalBrowserTheoryAttribute()
+    {
+        if (Environment.GetEnvironmentVariable("BTCPAY_RUN_PLAYWRIGHT") != "1")
+            Skip = "Run scripts/test-playwright.sh to enable the PostgreSQL-backed browser test.";
+    }
+}
+
 public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
 {
-    [LocalBrowserFact]
+    [LocalBrowserTheory]
+    [InlineData("exact")]
+    [InlineData("overpaid")]
+    [InlineData("partial-new")]
+    [InlineData("partial-old")]
     [Trait("Category", "Playwright")]
-    public async Task StoreInvoiceIsPaidAndSettledThroughCheatMode()
+    public async Task StoreInvoiceIsPaidAndSettledThroughCheatMode(string scenario)
     {
         await using var server = await BrowserTestServer.StartAsync();
         using var playwright = await Playwright.CreateAsync();
@@ -51,10 +65,17 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
 
             await page.GotoAsync($"/stores/{storeId}/Zcashlike/ZEC");
             output.WriteLine(server.UsesRegtest ? "Wallet: local regtest" : "Wallet: mock");
-            await page.Locator("#WalletPassword").FillAsync(server.UsesRegtest
-                ? Environment.GetEnvironmentVariable("BTCPAY_TEST_VIEWING_KEY")
-                    ?? throw new InvalidOperationException("Run zcash-regtest/scripts/prepare-test-wallet.py and source data/local/current.env first")
-                : "mock-viewing-key");
+            var viewingKey = "mock-viewing-key";
+            if (server.UsesRegtest)
+            {
+                using var client = new Services.ZkoolGraphQlClient(new Uri(server.CashcowUrl), new HttpClient());
+                var account = await client.SendAsync("mutation($newAccount: NewAccount!) { createAccount(newAccount: $newAccount) }",
+                    new { newAccount = new { name = $"browser-receiver-{Guid.NewGuid():N}", key = "", aindex = 0, birth = 1, useInternal = false } });
+                var keys = await client.SendAsync("query($accountFilter: AccountFilter) { accounts(accountFilter: $accountFilter) { ufvk } }",
+                    new { accountFilter = new { id = account["createAccount"]!.Value<int>() } });
+                viewingKey = keys["accounts"]![0]!["ufvk"]!.Value<string>()!;
+            }
+            await page.Locator("#WalletPassword").FillAsync(viewingKey);
             await page.Locator("#BirthHeight").FillAsync("1");
             await page.Locator("button[value='add-account']").ClickAsync();
             await Expect(page.Locator(".alert-success")).ToContainTextAsync("created for this store");
@@ -67,6 +88,21 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
             await page.GotoAsync($"/stores/{storeId}/Zcashlike/ZEC");
             await Expect(page.Locator("#Enabled")).ToBeCheckedAsync();
             await Expect(page.Locator("#CustomSettlementConfirmationThreshold")).ToHaveValueAsync("2");
+
+            if (scenario == "exact")
+            {
+                await page.GotoAsync("/stores/create");
+                await page.Locator("#Name").FillAsync("Duplicate viewing key test");
+                await page.Locator("#Create").ClickAsync();
+                await page.Locator("#menu-item-General").ClickAsync();
+                var secondStore = await page.Locator("#Id").InputValueAsync();
+                await page.GotoAsync($"/stores/{secondStore}/Zcashlike/ZEC");
+                await page.Locator("button[value='add-account']").ClickAsync();
+                await Expect(page.GetByText("A viewing key is required.", new() { Exact = true }).First).ToBeVisibleAsync();
+                await page.Locator("#WalletPassword").FillAsync(viewingKey);
+                await page.Locator("button[value='add-account']").ClickAsync();
+                await Expect(page.GetByText("This viewing key is already assigned to a store. Use a different viewing key.", new() { Exact = true }).First).ToBeVisibleAsync();
+            }
 
             await page.GotoAsync($"/stores/{storeId}/invoices");
             await page.Locator("#page-primary").ClickAsync();
@@ -81,23 +117,57 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
             output.WriteLine($"Created invoice {invoiceId}");
             await page.GotoAsync(href);
             await Expect(page.Locator("#test-payment-crypto-code")).ToHaveTextAsync("ZEC");
+            // Clear pending cashcow inputs left by earlier cases/runs on the shared regtest chain.
+            if (server.UsesRegtest)
+            {
+                await page.Locator("#BlockCount").FillAsync("1");
+                await SubmitCheatFormAsync(page, "form#mine-block button", "/mine-blocks");
+            }
+            var oldAddress = await page.Locator("#Address_ZEC-CHAIN [data-clipboard]").GetAttributeAsync("data-clipboard");
+            if (scenario.StartsWith("partial")) await page.Locator("#test-payment-amount").FillAsync("0.04");
+            if (scenario == "overpaid") await page.Locator("#test-payment-amount").FillAsync("0.12");
             await SubmitCheatFormAsync(page, "#FakePayment", "/test-payment");
             await Expect(page.Locator("#CheatSuccessMessage")).ToBeVisibleAsync();
             await Expect(page.Locator("#CheatErrorMessage")).ToHaveCountAsync(0);
 
             // Read the persisted merchant view in a second tab while checkout stays open.
             var merchant = await context.NewPageAsync();
-            await AssertInvoiceStatusAsync(merchant, storeId, invoiceId, "Processing");
+            if (scenario.StartsWith("partial"))
+            {
+                await Expect(page.Locator("#Address_ZEC-CHAIN [data-clipboard]")).Not.ToHaveAttributeAsync("data-clipboard", oldAddress!, new() { Timeout = 60_000 });
+                await AssertInvoiceStatusAsync(merchant, storeId, invoiceId, "New (paid partial)");
+                // The real cashcow has one funded note; confirm its first spend before reusing change.
+                if (server.UsesRegtest)
+                {
+                    await page.Locator("#BlockCount").FillAsync("1");
+                    await SubmitCheatFormAsync(page, "form#mine-block button", "/mine-blocks");
+                    await AssertConfirmationsAsync(merchant, invoiceId, "1 / 2");
+                }
+                var paymentLink = await page.Locator("#PayInWallet").GetAttributeAsync("href");
+                var remainingAmount = paymentLink!.Split("amount=")[1].Split('&')[0];
+                if (scenario == "partial-old")
+                {
+                    using var client = new Services.ZkoolGraphQlClient(new Uri(server.CashcowUrl), new HttpClient());
+                    await client.SendAsync("mutation($idAccount: Int!, $payment: Payment!) { pay(idAccount: $idAccount, payment: $payment) }",
+                        new { idAccount = 1, payment = new { recipients = new[] { new { address = oldAddress!.Trim(), amount = remainingAmount } } } });
+                }
+                else
+                {
+                    await page.Locator("#test-payment-amount").FillAsync(remainingAmount);
+                    await SubmitCheatFormAsync(page, "#FakePayment", "/test-payment");
+                }
+            }
+            await AssertInvoiceStatusAsync(merchant, storeId, invoiceId, scenario == "overpaid" ? "Processing (paid over)" : "Processing");
             await page.Locator("#BlockCount").FillAsync("1");
             await SubmitCheatFormAsync(page, "form#mine-block button", "/mine-blocks");
             await Expect(page.Locator("#CheatSuccessMessage")).ToBeVisibleAsync();
             // Wait for the persisted confirmation count, not just the mining acknowledgement.
             await AssertConfirmationsAsync(merchant, invoiceId, "1 / 2");
             // One block must remain insufficient for the configured two confirmations.
-            await AssertInvoiceStatusAsync(merchant, storeId, invoiceId, "Processing");
+            await AssertInvoiceStatusAsync(merchant, storeId, invoiceId, scenario == "overpaid" ? "Processing (paid over)" : "Processing");
             await page.Locator("#BlockCount").FillAsync("1");
             await SubmitCheatFormAsync(page, "form#mine-block button", "/mine-blocks");
-            await AssertInvoiceStatusAsync(merchant, storeId, invoiceId, "Settled");
+            await AssertInvoiceStatusAsync(merchant, storeId, invoiceId, scenario == "overpaid" ? "Settled (paid over)" : "Settled");
             await Expect(page.Locator("xpath=//*[text()=\"Invoice Paid\" or text()=\"Payment Received\"]")).ToBeVisibleAsync(new() { Timeout = 60_000 });
             await context.Tracing.StopAsync();
         }

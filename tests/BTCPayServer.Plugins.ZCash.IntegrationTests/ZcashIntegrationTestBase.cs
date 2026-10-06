@@ -23,6 +23,7 @@ public abstract class ZcashIntegrationTestBase : IAsyncLifetime
     protected ZcashRPCProvider Provider { get; private set; } = null!;
     protected ZcashCheckoutCheatModeExtension CheatMode { get; private set; } = null!;
     protected ZkoolGraphQlClient GraphQl { get; private set; } = null!;
+    protected Uri MockEndpoint { get; private set; } = null!;
     protected PaymentMethodId PaymentMethodId { get; } = PaymentTypes.CHAIN.GetPaymentMethodId("ZEC");
 
     public async Task InitializeAsync()
@@ -31,6 +32,7 @@ public abstract class ZcashIntegrationTestBase : IAsyncLifetime
         app.Urls.Add("http://127.0.0.1:0");
         await app.StartAsync();
         var endpoint = new Uri(app.Urls.Single());
+        MockEndpoint = endpoint;
         var configuration = new ZcashLikeConfiguration();
         configuration.ZcashLikeConfigurationItems.Add("ZEC", new ZcashLikeConfigurationItem
         {

@@ -16,6 +16,7 @@ internal sealed class BrowserTestServer : IAsyncDisposable
     private readonly object logLock = new();
     public string Url { get; private set; } = "";
     public bool UsesRegtest { get; private set; }
+    public string CashcowUrl { get; private set; } = "";
     public string Artifacts { get; private set; } = "";
     private string logPath => Path.Combine(Artifacts, "server.log");
 
@@ -63,6 +64,7 @@ internal sealed class BrowserTestServer : IAsyncDisposable
             cashcowUrl = graphqlUrl;
             rpcUrl = mock.Urls.Single() + "/rpc";
         }
+        CashcowUrl = cashcowUrl;
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
