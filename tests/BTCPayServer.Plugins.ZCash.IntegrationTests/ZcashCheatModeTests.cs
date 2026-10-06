@@ -173,7 +173,9 @@ public class ZcashCheatModeTests : ZcashIntegrationTestBase
     [InlineData("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg")]
     public void WalletRejectionCannotBeReportedAsSuccessfulPayment(string walletResult)
     {
-        Assert.Throws<InvalidOperationException>(() => Services.ZkoolGraphQlClient.RequireTransactionId(JToken.FromObject(walletResult)));
+        var error = Assert.Throws<InvalidOperationException>(() => Services.ZkoolGraphQlClient.RequireTransactionId(JToken.FromObject(walletResult)));
+        if (!string.IsNullOrEmpty(walletResult))
+            Assert.Contains(walletResult, error.Message);
     }
 
     [Fact]

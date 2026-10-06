@@ -2,6 +2,7 @@ using System.Net.WebSockets;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 
 namespace MockZkool;
 
@@ -15,8 +16,30 @@ public static class MockWalletServer
         var wallet = new MockWallet();
         var available = true;
         app.MapPost("/test/availability/{value:bool}", (bool value) => { available = value; return Results.Ok(); });
-        var subscriptions = new ConcurrentDictionary<string, int>();
-        app.MapGet("/test/subscriptions", () => subscriptions.Values.Order().ToArray());
+        var subscriptions = new ConcurrentDictionary<string, (int Account, string RequestId, Channel<JsonObject> Outgoing)>();
+        var sentEvents = new ConcurrentDictionary<string, DateTimeOffset>();
+        var subscriptionDelivery = false;
+        app.MapGet("/test/subscriptions", () => subscriptions.Values.Select(s => s.Account).Order().ToArray());
+        app.MapGet("/test/sent-events", () => sentEvents);
+        // This mode isolates the subscription path: hide receipts from discovery queries,
+        // while keeping transaction details available to the listener after a TX notification.
+        app.MapPost("/test/subscription-delivery/{value:bool}", (bool value) =>
+        {
+            Volatile.Write(ref subscriptionDelivery, value);
+            wallet.SuppressPolling = value;
+            return Results.Ok();
+        });
+        wallet.TransactionReceived = (account, txid) =>
+        {
+            if (!Volatile.Read(ref subscriptionDelivery)) return;
+            foreach (var subscriber in subscriptions.Values.Where(s => s.Account == account))
+                subscriber.Outgoing.Writer.TryWrite(new JsonObject
+                {
+                    ["id"] = subscriber.RequestId, ["type"] = "next",
+                    ["payload"] = new JsonObject { ["data"] = new JsonObject
+                    { ["events"] = new JsonObject { ["type"] = "TX", ["height"] = 0, ["txid"] = txid } } }
+                });
+        };
         app.MapGet("/health", () => Results.Ok(new { mock = true }));
         app.MapPost("/graphql", async (HttpContext context) =>
         {
@@ -37,7 +60,7 @@ public static class MockWalletServer
             }
             catch (ArgumentException e) { return Results.Json(new { id = body["id"]?.DeepClone(), error = new { code = -32602, message = e.Message } }); }
         });
-        // Subscriptions remain idle; the plugin's existing poller discovers mock transactions/blocks.
+        // Subscriptions are idle by default so the existing cases continue testing fallback recovery.
         app.UseWebSockets();
         app.Map("/subscriptions", async context =>
         {
@@ -45,6 +68,19 @@ public static class MockWalletServer
             using var socket = await context.WebSockets.AcceptWebSocketAsync("graphql-transport-ws");
             var buffer = new byte[16384];
             var owned = new List<string>();
+            var outgoing = Channel.CreateUnbounded<JsonObject>();
+            using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+            // A WebSocket allows only one concurrent sender; serialize events and protocol replies.
+            async Task SendMessages()
+            {
+                await foreach (var frame in outgoing.Reader.ReadAllAsync(connectionCts.Token))
+                {
+                    await socket.SendAsync(Encoding.UTF8.GetBytes(frame.ToJsonString()), WebSocketMessageType.Text, true, connectionCts.Token);
+                    var txid = frame["payload"]?["data"]?["events"]?["txid"]?.GetValue<string>();
+                    if (txid != null) sentEvents[txid] = DateTimeOffset.UtcNow;
+                }
+            }
+            var sender = SendMessages();
             try
             {
                 while (socket.State == WebSocketState.Open)
@@ -57,15 +93,27 @@ public static class MockWalletServer
                     {
                         var subscriptionId = Guid.NewGuid().ToString();
                         owned.Add(subscriptionId);
-                        subscriptions[subscriptionId] = payload!["payload"]!["variables"]!["idAccount"]!.GetValue<int>();
+                        subscriptions[subscriptionId] = (payload!["payload"]!["variables"]!["idAccount"]!.GetValue<int>(),
+                            payload["id"]!.GetValue<string>(), outgoing);
                     }
+                    if (type == "complete")
+                        foreach (var id in owned.Where(id => subscriptions.TryGetValue(id, out var s) && s.RequestId == payload?["id"]?.GetValue<string>()))
+                            subscriptions.TryRemove(id, out _);
                     if (type is "connection_init" or "ping")
-                        await socket.SendAsync(Encoding.UTF8.GetBytes(type == "ping" ? "{\"type\":\"pong\"}" : "{\"type\":\"connection_ack\"}"), WebSocketMessageType.Text, true, context.RequestAborted);
+                        outgoing.Writer.TryWrite(new JsonObject { ["type"] = type == "ping" ? "pong" : "connection_ack" });
                 }
             }
             catch (OperationCanceledException) { }
             catch (WebSocketException) { }
-            finally { foreach (var id in owned) subscriptions.TryRemove(id, out _); }
+            finally
+            {
+                foreach (var id in owned) subscriptions.TryRemove(id, out _);
+                connectionCts.Cancel();
+                outgoing.Writer.TryComplete();
+                try { await sender; }
+                catch (OperationCanceledException) { }
+                catch (WebSocketException) { }
+            }
         });
         return app;
     }
@@ -74,6 +122,8 @@ public static class MockWalletServer
 internal sealed class MockWallet
 {
     private readonly object gate = new();
+    public Action<int, string>? TransactionReceived { get; set; }
+    public volatile bool SuppressPolling;
     private long height = 200;
     private int nextAccount = 2;
     private int nextAddress = 0;
@@ -141,9 +191,14 @@ internal sealed class MockWallet
                     }
                     tx["notes"]!.AsArray().Add(new JsonObject { ["value"] = amount, ["address"] = address, ["diversifierIndex"] = receiver.Index });
                 }
+                foreach (var account in transactions.Where(t => t.Tx["txid"]!.GetValue<string>() == txid).Select(t => t.Account).Distinct())
+                    TransactionReceived?.Invoke(account, txid);
                 return Result("pay", JsonValue.Create(txid));
             }
             var txs = transactions.Where(t => t.Account == id).Select(t => t.Tx).ToList();
+            if (SuppressPolling && q.Contains("unconfirmedByAccount") &&
+                (q.Contains("transactionsByAccount") || !q.Contains("notes")))
+                txs.Clear();
             if (q.Contains("transactionById")) return Result("transactionById", txs.FirstOrDefault(t => t["txid"]!.GetValue<string>() == v["txid"]?.GetValue<string>())?.DeepClone());
             if (q.Contains("transactionsByAccount") && q.Contains("unconfirmedByAccount"))
                 return new JsonObject

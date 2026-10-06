@@ -24,18 +24,39 @@ public sealed class LocalBrowserTheoryAttribute : TheoryAttribute
     }
 }
 
+public sealed class LocalRegtestBrowserFactAttribute : FactAttribute
+{
+    public LocalRegtestBrowserFactAttribute()
+    {
+        if (Environment.GetEnvironmentVariable("BTCPAY_RUN_PLAYWRIGHT") != "1" ||
+            Environment.GetEnvironmentVariable("BTCPAY_TEST_WALLET") != "regtest")
+            Skip = "Set BTCPAY_TEST_WALLET=regtest and run scripts/test-playwright.sh for real zkool timing.";
+    }
+}
+
 public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
 {
+    [LocalRegtestBrowserFact]
+    [Trait("Category", "Playwright")]
+    public Task RealZkoolSubscriptionPersistsPaymentWithinTwoSeconds() =>
+        StoreInvoiceIsPaidAndSettledThroughCheatMode("subscription-live");
+
+    [LocalRegtestBrowserFact]
+    [Trait("Category", "Playwright")]
+    public Task RealZkoolSubscriptionStillReceivesPaymentsAfterIdleConnection() =>
+        StoreInvoiceIsPaidAndSettledThroughCheatMode("subscription-live-idle");
+
     [LocalBrowserTheory]
     [InlineData("exact")]
     [InlineData("overpaid")]
     [InlineData("partial-new")]
     [InlineData("partial-old")]
     [InlineData("offline-expired")]
+    [InlineData("subscription-latency")]
     [Trait("Category", "Playwright")]
     public async Task StoreInvoiceIsPaidAndSettledThroughCheatMode(string scenario)
     {
-        await using var server = await BrowserTestServer.StartAsync(forceMock: scenario == "offline-expired");
+        await using var server = await BrowserTestServer.StartAsync(forceMock: scenario is "offline-expired" or "subscription-latency");
         using var playwright = await Playwright.CreateAsync();
         if (Environment.GetEnvironmentVariable("BTCPAY_PLAYWRIGHT_INSTALL") == "1")
             Assert.Equal(0, Microsoft.Playwright.Program.Main(["install", "chromium"]));
@@ -125,6 +146,13 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
                 await SubmitCheatFormAsync(page, "form#mine-block button", "/mine-blocks");
             }
             var oldAddress = await page.Locator("#Address_ZEC-CHAIN [data-clipboard]").GetAttributeAsync("data-clipboard");
+            if (scenario.StartsWith("subscription-"))
+            {
+                await VerifySubscriptionLatencyAsync(server, page, storeId, invoiceId, oldAddress!,
+                    idleSeconds: scenario.EndsWith("-idle") ? 40 : 0);
+                await context.Tracing.StopAsync();
+                return;
+            }
             if (scenario == "offline-expired")
             {
                 await VerifyExpiredInvoiceRecoveryAsync(server, page, storeId, invoiceId, oldAddress!);
@@ -187,6 +215,105 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
             output.WriteLine(server.ReadLog());
             throw;
         }
+    }
+
+    private async Task VerifySubscriptionLatencyAsync(BrowserTestServer server, IPage page,
+        string storeId, string invoiceId, string address, int idleSeconds = 0)
+    {
+        await using var db = new Npgsql.NpgsqlConnection(server.DatabaseConnectionString);
+        await db.OpenAsync();
+        await using var receiver = new Npgsql.NpgsqlCommand(
+            "SELECT \"AccountIndex\", \"AddressIndex\" FROM \"BTCPayServer.Plugins.ZCash\".\"Receivers\" WHERE \"UnifiedAddress\" = @address", db);
+        receiver.Parameters.AddWithValue("address", address);
+        int account, index;
+        await using (var row = await receiver.ExecuteReaderAsync())
+        {
+            Assert.True(await row.ReadAsync());
+            account = row.GetInt32(0);
+            index = row.GetInt32(1);
+        }
+        using var http = new HttpClient { BaseAddress = new Uri(server.CashcowUrl) };
+        var deadline = DateTime.UtcNow.AddSeconds(25);
+        while (true)
+        {
+            if (server.UsesRegtest)
+            {
+                if (server.ReadLog().Contains($"GraphQL subscription requested for account {account} at "))
+                {
+                    // Local transport handshake precedes the later transaction broadcast.
+                    await Task.Delay(500);
+                    break;
+                }
+                Assert.True(DateTime.UtcNow < deadline, "Receiver subscription was not started. " + server.ReadLog());
+                await Task.Delay(50);
+                continue;
+            }
+            var accounts = JArray.Parse(await http.GetStringAsync("/test/subscriptions"));
+            if (accounts.Values<int>().Contains(account)) break;
+            Assert.True(DateTime.UtcNow < deadline, "Receiver subscription was not registered. " + server.ReadLog());
+            await Task.Delay(50);
+        }
+        if (!server.UsesRegtest)
+        {
+            using var enabled = await http.PostAsync("/test/subscription-delivery/true", null);
+            enabled.EnsureSuccessStatusCode();
+        }
+        if (idleSeconds > 0)
+        {
+            output.WriteLine($"Leaving the subscribed connection idle for {idleSeconds} seconds before paying.");
+            await Task.Delay(TimeSpan.FromSeconds(idleSeconds));
+        }
+        var paymentLink = await page.Locator("#PayInWallet").GetAttributeAsync("href");
+        var amount = paymentLink!.Split("amount=")[1].Split('&')[0];
+        using var wallet = new Services.ZkoolGraphQlClient(new Uri(server.CashcowUrl), new HttpClient());
+        var startedAt = DateTimeOffset.UtcNow;
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var result = await wallet.SendAsync(
+            "mutation($idAccount: Int!, $payment: Payment!) { pay(idAccount: $idAccount, payment: $payment) }",
+            new { idAccount = 1, payment = new { recipients = new[] { new { address, amount } } } });
+        var mutationReturnedAt = DateTimeOffset.UtcNow;
+        var txid = Services.ZkoolGraphQlClient.RequireTransactionId(result["pay"]);
+        var paymentId = $"{txid}#{account}#{index}";
+        var wait = System.Diagnostics.Stopwatch.StartNew();
+        await using var payment = new Npgsql.NpgsqlCommand(
+            "SELECT \"Amount\" FROM \"Payments\" WHERE \"InvoiceDataId\" = @invoice AND \"Id\" = @payment", db);
+        payment.Parameters.AddWithValue("invoice", invoiceId);
+        payment.Parameters.AddWithValue("payment", paymentId);
+        object? paidAmount;
+        do
+        {
+            paidAmount = await payment.ExecuteScalarAsync();
+            if (paidAmount != null && server.ReadLog().Contains($"{paymentId} via subscription at ")) break;
+            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(server.UsesRegtest ? 30 : 5), "Subscription did not persist payment. " + server.ReadLog());
+            await Task.Delay(25);
+        } while (true);
+        elapsed.Stop();
+        Assert.Equal(decimal.Parse(amount, System.Globalization.CultureInfo.InvariantCulture), (decimal)paidAmount);
+        // The persisted payment must come from a subscription, never a polling/reconciliation race.
+        DateTimeOffset TraceTime(string pattern)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(server.ReadLog(), pattern);
+            Assert.True(match.Success, "Missing subscription trace: " + pattern + "\n" + server.ReadLog());
+            return DateTimeOffset.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+        }
+        var receivedAt = TraceTime($"GraphQL subscription received transaction {txid} for account {account} at (\\S+)");
+        var persistedAt = TraceTime($"{paymentId} via subscription at (\\S+)");
+        if (!server.UsesRegtest)
+        {
+            using var sentEvents = System.Text.Json.JsonDocument.Parse(await http.GetStringAsync("/test/sent-events"));
+            var sentAt = sentEvents.RootElement.GetProperty(txid).GetDateTimeOffset();
+            output.WriteLine($"Mock TX sent {sentAt:O}; send → BTCPay callback: {(receivedAt - sentAt).TotalMilliseconds:F1} ms.");
+        }
+        output.WriteLine($"TX {txid}: mutation started {startedAt:O}, returned {mutationReturnedAt:O}, subscription received {receivedAt:O}, payment persisted {persistedAt:O}");
+        output.WriteLine($"Mutation start → persisted receipt observed: {elapsed.Elapsed.TotalMilliseconds:F1} ms; subscription callback → persistence: {(persistedAt - receivedAt).TotalMilliseconds:F1} ms.");
+        if (!server.UsesRegtest)
+            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(2), $"Subscription detection took {elapsed.Elapsed.TotalMilliseconds:F1} ms.");
+        Assert.InRange((persistedAt - receivedAt).TotalMilliseconds, 0, 2000);
+        await AssertInvoiceStatusAsync(page, storeId, invoiceId, "Processing");
+        await using var count = new Npgsql.NpgsqlCommand(
+            "SELECT COUNT(*) FROM \"Payments\" WHERE \"InvoiceDataId\" = @invoice", db);
+        count.Parameters.AddWithValue("invoice", invoiceId);
+        Assert.Equal(1L, (long)(await count.ExecuteScalarAsync())!);
     }
 
     private static async Task VerifyExpiredInvoiceRecoveryAsync(BrowserTestServer server, IPage page,
