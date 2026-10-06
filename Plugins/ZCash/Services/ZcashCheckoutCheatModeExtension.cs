@@ -82,7 +82,11 @@ mutation($idAccounts: [Int!]!) {
         var cashcow = _rpcProvider.CashCowWalletGraphQlClients[_network.CryptoCode.ToUpperInvariant()];
 
 
+        var before = await cashcow.SendAsync("query { currentHeight }");
+        var target = before["currentHeight"]!.Value<long>() + mineBlockContext.BlockCount;
         await daemon.SendRpc10CommandAsync<int[], string[]>("generate", new[] { mineBlockContext.BlockCount });
+        // Zebra acknowledges mining before lightwalletd necessarily serves those blocks.
+        await ZcashRPCProvider.WaitForWalletHeightAsync(cashcow, target);
         await cashcow.SendAsync(@"
 mutation($idAccounts: [Int!]!) {
   synchronize(idAccounts: $idAccounts)

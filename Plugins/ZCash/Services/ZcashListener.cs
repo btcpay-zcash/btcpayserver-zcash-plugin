@@ -226,6 +226,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 {
                     await using var ctx = await _dbContextFactory.CreateDbContextAsync();
                     var ua = await ctx.Receivers.FirstOrDefaultAsync(r =>
+                        r.UnifiedAddress == transfer.Address ||
                         r.SaplingAddress == transfer.Address ||
                         r.OrchardAddress == transfer.Address ||
                         r.TransparentAddress == transfer.Address);
@@ -294,6 +295,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 await using var ctx = await _dbContextFactory.CreateDbContextAsync();
 
                 var ua = await ctx.Receivers.FirstOrDefaultAsync(r =>
+                    r.UnifiedAddress == destination.Key ||
                     r.SaplingAddress == destination.Key ||
                     r.OrchardAddress == destination.Key ||
                     r.TransparentAddress == destination.Key);

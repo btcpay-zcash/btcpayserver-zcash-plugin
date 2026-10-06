@@ -11,6 +11,17 @@ This plugin extends BTCPayServer to enable users to receive payments via Zcash.
 
 [docs/installation.md](./docs/installation.md)
 
+## Local development and integration tests
+
+For Docker-free local testing with mock zkool/mining endpoints and the existing
+checkout cheatmode, see [docs/local-testing.md](docs/local-testing.md).
+
+```sh
+./scripts/run-local.sh
+./scripts/test-playwright.sh
+dotnet test tests/BTCPayServer.Plugins.ZCash.IntegrationTests/BTCPayServer.Plugins.ZCash.IntegrationTests.csproj
+```
+
 ## Full Node
 
 Running a full node (with `zebra` and `lightwalletd`)
