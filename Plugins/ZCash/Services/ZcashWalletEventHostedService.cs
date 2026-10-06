@@ -79,9 +79,21 @@ namespace BTCPayServer.Plugins.ZCash.Services
 
         public async Task StopAsync(CancellationToken cancellationToken)
         {
-            _cts?.Cancel();
-            await Task.WhenAll(_loops).WaitAsync(cancellationToken);
-            _cts?.Dispose();
+            try
+            {
+                _cts?.Cancel();
+                await Task.WhenAll(_loops).WaitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested
+                || _cts?.IsCancellationRequested == true)
+            {
+                // Cancellation is expected when stopping the wallet loops or
+                // when the host's graceful shutdown deadline expires.
+            }
+            finally
+            {
+                _cts?.Dispose();
+            }
         }
     }
 }
