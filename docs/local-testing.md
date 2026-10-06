@@ -209,3 +209,54 @@ ownership: legacy account IDs, diversifier indices and receiver-to-invoice mappi
 must also be reconciled before retiring the old backend. Starting a fresh receiving
 wallet is suitable for future invoices only; old invoice addresses still require
 monitoring. The one-time migration UI is not implemented yet.
+
+## Subscription latency tracing
+
+zkool's `pay` mutation broadcasts the signed transaction and returns its txid.
+Its receiver event is emitted separately: the lightwalletd mempool stream supplies
+transaction bytes, zkool decrypts the notes, stores them in `MEMPOOL.unconfirmed`,
+and publishes `TX` to the account's subscription. BTCPay then fetches transaction
+receipts and persists the payment. Events can arrive before the mutation response.
+
+zkool logs broadcast completion and TX publication with their account and txid;
+publication includes the subscriber count. Start its local stack with `RUST_LOG=info`
+to capture those timestamps. Initial monitor setup failures are logged and retried
+after five seconds.
+The plugin logs subscription receipt and payment persistence timestamps with the
+same txid. The payment log identifies `subscription`, `poll`, or `reconciliation`.
+The listener queue and database/network work are included in the interval between
+subscription receipt and payment persistence.
+
+The client disables native WebSocket keepalives: Juniper's Warp adapter parses
+native pong frames as GraphQL JSON and closes the connection at .NET's default
+30-second interval. Juniper's GraphQL-level heartbeats remain enabled. The real
+`RealZkoolSubscriptionStillReceivesPaymentsAfterIdleConnection` test waits 40
+seconds before paying to guard against this disconnect and polling fallback.
+
+```sh
+# Deterministic full-listener test: mock WebSocket delivery, polling discovery hidden.
+BTCPAY_RUN_PLAYWRIGHT=1 BTCPAY_TEST_WALLET=mock BTCPAY_PLAYWRIGHT_INSTALL=0 \
+  dotnet test tests/BTCPayServer.Plugins.ZCash.IntegrationTests/BTCPayServer.Plugins.ZCash.IntegrationTests.csproj -m:1 \
+  --filter 'Category=Playwright&DisplayName~subscription-latency' \
+  --logger 'console;verbosity=detailed'
+
+# Real zkool/node timing, with the local regtest stack running.
+BTCPAY_RUN_PLAYWRIGHT=1 BTCPAY_TEST_WALLET=regtest BTCPAY_PLAYWRIGHT_INSTALL=0 \
+  dotnet test tests/BTCPayServer.Plugins.ZCash.IntegrationTests/BTCPayServer.Plugins.ZCash.IntegrationTests.csproj -m:1 \
+  --filter 'FullyQualifiedName~RealZkoolSubscriptionPersistsPaymentWithinTwoSeconds' \
+  --logger 'console;verbosity=detailed'
+```
+
+Both tests require the first persisted receipt to come from a subscription, match
+the invoice's account/diversifier and amount, and appear exactly once. They assert
+a two-second subscription-callback-to-persistence budget. The mock also asserts
+two seconds from mutation request to observed persistence. The real test reports
+the complete mutation-to-receipt time separately because signing, broadcasting,
+and node/mempool propagation are outside BTCPay's processing budget. Detailed test
+output contains the timestamps and measured intervals.
+
+A local regtest run on 2026-10-06 measured 4.39 seconds for signing/broadcasting,
+34 ms from broadcast completion to zkool TX publication, 1 ms for WebSocket
+delivery, and 176 ms from BTCPay's subscription callback to payment persistence.
+These are observations from one run; the tests enforce the BTCPay processing
+budget separately from upstream transaction creation and propagation.

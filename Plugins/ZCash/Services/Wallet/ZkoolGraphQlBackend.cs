@@ -685,6 +685,7 @@ mutation($idAccount: Int!) {
 
                 void WebSocketExceptionHandler(Exception ex)
                 {
+                    logger?.LogWarning(ex, "[{CryptoCode}] GraphQL subscription transport error for account {AccountIndex}", CryptoCode, accountIndex);
                     Interlocked.Increment(ref errorCount);
                     tcs.TrySetResult();
                     subscriptionCts.Cancel();
@@ -707,6 +708,9 @@ mutation($idAccount: Int!) {
                                 var evt = MapSubscriptionEvent(response, accountIndex);
                                 if (evt != null)
                                 {
+                                    if (evt.TransactionHash != null)
+                                        logger?.LogInformation("[{CryptoCode}] GraphQL subscription received transaction {TransactionId} for account {AccountIndex} at {ReceivedAt:O}",
+                                            CryptoCode, evt.TransactionHash, accountIndex, DateTimeOffset.UtcNow);
                                     eventAggregator.Publish(evt);
                                 }
                             },
@@ -717,6 +721,8 @@ mutation($idAccount: Int!) {
                             },
                             () => tcs.TrySetResult()
                         );
+                    logger?.LogInformation("[{CryptoCode}] GraphQL subscription requested for account {AccountIndex} at {RequestedAt:O}",
+                        CryptoCode, accountIndex, DateTimeOffset.UtcNow);
 
                     using var reg = subscriptionCts.Token.Register(() => tcs.TrySetResult());
                     await tcs.Task;
@@ -752,7 +758,7 @@ mutation($idAccount: Int!) {
             return type switch
             {
                 "BLOCK" => new ZcashEvent { CryptoCode = CryptoCode, BlockHash = height.ToString(CultureInfo.InvariantCulture) },
-                "TX" when !string.IsNullOrEmpty(txid) => new ZcashEvent { CryptoCode = CryptoCode, AccountIndex = accountIndex, TransactionHash = txid },
+                "TX" when !string.IsNullOrEmpty(txid) => new ZcashEvent { CryptoCode = CryptoCode, AccountIndex = accountIndex, TransactionHash = txid, FromSubscription = true },
                 _ => null
             };
         }

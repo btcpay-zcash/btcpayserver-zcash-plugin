@@ -4,6 +4,7 @@ namespace BBTCPayServer.Plugins.ZCash.RPC
     {
         public string BlockHash { get; set; }
         public bool Reconcile { get; set; }
+        public bool FromSubscription { get; set; }
         public string TransactionHash { get; set; }
         public string CryptoCode { get; set; }
         public long? AccountIndex { get; set; }

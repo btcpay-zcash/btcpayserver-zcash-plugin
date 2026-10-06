@@ -107,15 +107,17 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 }
                 if (!string.IsNullOrEmpty(zcashEvent.TransactionHash) && zcashEvent.AccountIndex is not null)
                 {
-                    await OnTransactionUpdated(zcashEvent.CryptoCode, zcashEvent.TransactionHash, (long) zcashEvent.AccountIndex);
+                    await OnTransactionUpdated(zcashEvent.CryptoCode, zcashEvent.TransactionHash, (long) zcashEvent.AccountIndex,
+                        zcashEvent.FromSubscription ? "subscription" : "poll");
                 }
             }
         }
 
-        private async Task ReceivedPayment(InvoiceEntity invoice, PaymentEntity payment)
+        private async Task ReceivedPayment(InvoiceEntity invoice, PaymentEntity payment, string detectionSource)
         {
             _logger.LogInformation(
-                $"Invoice {invoice.Id} received payment {payment.Value} {payment.Currency} {payment.Id}");
+                "Invoice {InvoiceId} received payment {Value} {Currency} {PaymentId} via {DetectionSource} at {ReceivedAt:O}",
+                invoice.Id, payment.Value, payment.Currency, payment.Id, detectionSource, DateTimeOffset.UtcNow);
 
 
             var prompt = invoice.GetPaymentPrompt(payment.PaymentMethodId);
@@ -295,7 +297,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
         }
         
 
-        private async Task OnTransactionUpdated(string cryptoCode, string transactionHash, long accountIndex)
+        private async Task OnTransactionUpdated(string cryptoCode, string transactionHash, long accountIndex, string detectionSource)
         {
             var paymentMethodId = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
             var transfer = await _ZcashRpcProvider.WalletBackends[cryptoCode]
@@ -314,7 +316,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 if (invoice == null) continue;
                 await HandlePaymentData(cryptoCode, receiver.UnifiedAddress,
                     destination.Sum(t => t.Amount), destination.Key.AccountIndex, destination.Key.AddressIndex,
-                    transfer.TransactionId, transfer.Confirmations, transfer.Height, invoice, paymentsToUpdate);
+                    transfer.TransactionId, transfer.Confirmations, transfer.Height, invoice, paymentsToUpdate, detectionSource);
             }
 
             if (paymentsToUpdate.Any())
@@ -333,7 +335,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
         private async Task HandlePaymentData(string cryptoCode, string address, long totalAmount, long subaccountIndex,
             long subaddressIndex,
             string txId, long confirmations, long blockHeight, InvoiceEntity invoice,
-            List<(PaymentEntity Payment, InvoiceEntity invoice)> paymentsToUpdate)
+            List<(PaymentEntity Payment, InvoiceEntity invoice)> paymentsToUpdate, string detectionSource = "reconciliation")
         {
             var network = _networkProvider.GetNetwork(cryptoCode);
             var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
@@ -382,7 +384,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 var payment = await _paymentService.AddPayment(paymentData, [txId]);
                 if (payment != null)
                 {
-                    await ReceivedPayment(await _invoiceRepository.GetInvoice(invoice.Id), payment);
+                    await ReceivedPayment(await _invoiceRepository.GetInvoice(invoice.Id), payment, detectionSource);
                 }
                 else
                 {
