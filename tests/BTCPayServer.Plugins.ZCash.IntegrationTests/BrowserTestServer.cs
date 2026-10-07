@@ -11,22 +11,25 @@ internal sealed class BrowserTestServer : IAsyncDisposable
 {
     private WebApplication? mock;
     private Process? process;
+    private ProcessStartInfo? startInfo;
+    public string DatabaseConnectionString { get; private set; } = "";
     private string adminConnection = "";
     private string database = "";
     private readonly object logLock = new();
     public string Url { get; private set; } = "";
     public bool UsesRegtest { get; private set; }
+    public string CashcowUrl { get; private set; } = "";
     public string Artifacts { get; private set; } = "";
     private string logPath => Path.Combine(Artifacts, "server.log");
 
-    public static async Task<BrowserTestServer> StartAsync()
+    public static async Task<BrowserTestServer> StartAsync(bool forceMock = false)
     {
         var result = new BrowserTestServer();
-        try { await result.StartCoreAsync(); return result; }
+        try { await result.StartCoreAsync(forceMock); return result; }
         catch { await result.DisposeAsync(); throw; }
     }
 
-    private async Task StartCoreAsync()
+    private async Task StartCoreAsync(bool forceMock)
     {
         var root = new DirectoryInfo(AppContext.BaseDirectory);
         while (root != null && !File.Exists(Path.Combine(root.FullName, "btcpay-zcash-plugin.sln"))) root = root.Parent;
@@ -45,7 +48,7 @@ internal sealed class BrowserTestServer : IAsyncDisposable
             await using var command = new NpgsqlCommand($"CREATE DATABASE {database}", connection);
             await command.ExecuteNonQueryAsync();
         }
-        var regtest = await RegtestEndpoints.DetectAsync();
+        var regtest = forceMock ? null : await RegtestEndpoints.DetectAsync();
         UsesRegtest = regtest != null;
         string graphqlUrl, cashcowUrl, rpcUrl;
         if (regtest != null)
@@ -63,6 +66,7 @@ internal sealed class BrowserTestServer : IAsyncDisposable
             cashcowUrl = graphqlUrl;
             rpcUrl = mock.Urls.Single() + "/rpc";
         }
+        CashcowUrl = cashcowUrl;
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
@@ -78,6 +82,7 @@ internal sealed class BrowserTestServer : IAsyncDisposable
         // Prevent inherited local-launch settings from leaking into this isolated instance.
         foreach (var key in start.Environment.Keys.Where(k => k.StartsWith("BTCPAY_", StringComparison.OrdinalIgnoreCase) || k.StartsWith("ASPNETCORE_", StringComparison.OrdinalIgnoreCase)).ToArray()) start.Environment.Remove(key);
         cs.Database = database;
+        DatabaseConnectionString = cs.ConnectionString;
         void Env(string key, string value) => start.Environment[key] = value;
         Env("ASPNETCORE_ENVIRONMENT", "Development");
         Env("BTCPAY_NETWORK", "regtest"); Env("BTCPAY_CHAINS", "zec"); Env("BTCPAY_CHEATMODE", "true");
@@ -91,15 +96,26 @@ internal sealed class BrowserTestServer : IAsyncDisposable
         Env("BTCPAY_ZEC_WALLET_CASHCOW_URI", cashcowUrl);
         Env("BTCPAY_ZEC_CASHCOW_DAEMON_URI", rpcUrl);
         if (UsesRegtest) Env("BTCPAY_ZEC_CASHCOW_MINER_SEED", "burger voice warrior danger satoshi you solid atom elite alcohol category layer able debate culture talk tissue language hip surge fiction paddle stove voyage");
-        process = new Process { StartInfo = start };
+        startInfo = start;
+        StartProcess();
+        await WaitUntilReadyAsync();
+    }
+
+    private void StartProcess()
+    {
+        process = new Process { StartInfo = startInfo! };
         void Log(object sender, DataReceivedEventArgs e) { if (e.Data != null) lock (logLock) File.AppendAllText(logPath, e.Data + Environment.NewLine); }
         process.OutputDataReceived += Log; process.ErrorDataReceived += Log;
         process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine();
+    }
+
+    private async Task WaitUntilReadyAsync()
+    {
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
         var deadline = DateTime.UtcNow.AddSeconds(UsesRegtest ? 240 : 90);
         while (DateTime.UtcNow < deadline)
         {
-            if (process.HasExited) throw new InvalidOperationException("BTCPay exited during startup:\n" + ReadLog());
+            if (process!.HasExited) throw new InvalidOperationException("BTCPay exited during startup:\n" + ReadLog());
             try
             {
                 if ((await client.GetAsync(Url)).IsSuccessStatusCode
@@ -110,6 +126,31 @@ internal sealed class BrowserTestServer : IAsyncDisposable
             await Task.Delay(250);
         }
         throw new TimeoutException("BTCPay startup timed out:\n" + ReadLog());
+    }
+
+    public async Task StopDetectionAsync()
+    {
+        if (process != null)
+        {
+            if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); }
+            process.Dispose();
+            process = null;
+        }
+    }
+
+    public async Task RestartDetectionAsync()
+    {
+        await StopDetectionAsync();
+        StartProcess();
+        await WaitUntilReadyAsync();
+    }
+
+    public async Task SetMockWalletAvailableAsync(bool value)
+    {
+        if (mock == null) throw new InvalidOperationException("Requires the isolated mock wallet");
+        using var http = new HttpClient();
+        using var response = await http.PostAsync(mock.Urls.Single() + "/test/availability/" + value.ToString().ToLowerInvariant(), null);
+        response.EnsureSuccessStatusCode();
     }
 
     public string ReadLog() { lock (logLock) return File.Exists(logPath) ? File.ReadAllText(logPath) : ""; }

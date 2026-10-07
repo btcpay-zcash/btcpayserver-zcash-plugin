@@ -29,7 +29,11 @@ namespace BTCPayServer.Plugins.ZCash.Services
             {
                 EndPoint = httpEndpoint,
                 WebSocketEndPoint = wsEndpoint,
-                WebSocketProtocol = "graphql-transport-ws"
+                WebSocketProtocol = "graphql-transport-ws",
+                // Juniper supplies GraphQL-level heartbeats. Its Warp adapter tries
+                // to deserialize native WebSocket pong frames as JSON and closes
+                // the connection when .NET sends its default 30-second keepalive.
+                ConfigureWebsocketOptions = options => options.KeepAliveInterval = Timeout.InfiniteTimeSpan
             };
 
             var serializer = new NewtonsoftJsonSerializer(new JsonSerializerSettings
@@ -58,6 +62,19 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 throw new GraphQlApiException(response.Errors.Select(e => e.Message));
 
             return response.Data ?? new JObject();
+        }
+
+        public static string RequireTransactionId(JToken token)
+        {
+            var txid = token?.Value<string>();
+            if (txid == null || txid.Length != 64 || !txid.All(Uri.IsHexDigit))
+            {
+                var reason = string.IsNullOrWhiteSpace(txid)
+                    ? "The wallet did not return a valid transaction ID."
+                    : $"The wallet did not return a valid transaction ID. Wallet response: {txid}";
+                throw new InvalidOperationException($"{reason} Check wallet status before retrying.");
+            }
+            return txid;
         }
 
         public IObservable<GraphQLResponse<JObject>> CreateSubscriptionStream(GraphQLRequest request, Action<Exception> webSocketExceptionHandler)

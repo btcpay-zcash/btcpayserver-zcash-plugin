@@ -15,6 +15,7 @@ using BTCPayServer.Plugins.ZCash.Configuration;
 using BTCPayServer.Plugins.ZCash.Payments;
 using BBTCPayServer.Plugins.ZCash.RPC;
 using BTCPayServer.Plugins.ZCash.Data;
+using BTCPayServer.Plugins.ZCash.Data.Models;
 using BTCPayServer.Plugins.ZCash.Utils;
 using BTCPayServer.Services.Invoices;
 using Microsoft.Extensions.Hosting;
@@ -81,7 +82,8 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 if (_ZcashRpcProvider.IsAvailable(stateChanged.CryptoCode))
                 {
                     _logger.LogInformation($"{stateChanged.CryptoCode} just became available");
-                    _ = UpdateAnyPendingZcashLikePayment(stateChanged.CryptoCode);
+                    await RecoverPayments(stateChanged.CryptoCode, cancellationToken);
+                    await UpdateAnyPendingZcashLikePayment(stateChanged.CryptoCode);
                 }
                 else
                 {
@@ -95,19 +97,27 @@ namespace BTCPayServer.Plugins.ZCash.Services
 
                 if (!string.IsNullOrEmpty(zcashEvent.BlockHash))
                 {
+                    await RecoverPayments(zcashEvent.CryptoCode, cancellationToken);
                     await OnNewBlock(zcashEvent.CryptoCode);
+                }
+                else if (zcashEvent.Reconcile)
+                {
+                    await RecoverPayments(zcashEvent.CryptoCode, cancellationToken);
+                    await UpdateAnyPendingZcashLikePayment(zcashEvent.CryptoCode);
                 }
                 if (!string.IsNullOrEmpty(zcashEvent.TransactionHash) && zcashEvent.AccountIndex is not null)
                 {
-                    await OnTransactionUpdated(zcashEvent.CryptoCode, zcashEvent.TransactionHash, (long) zcashEvent.AccountIndex);
+                    await OnTransactionUpdated(zcashEvent.CryptoCode, zcashEvent.TransactionHash, (long) zcashEvent.AccountIndex,
+                        zcashEvent.FromSubscription ? "subscription" : "poll");
                 }
             }
         }
 
-        private async Task ReceivedPayment(InvoiceEntity invoice, PaymentEntity payment)
+        private async Task ReceivedPayment(InvoiceEntity invoice, PaymentEntity payment, string detectionSource)
         {
             _logger.LogInformation(
-                $"Invoice {invoice.Id} received payment {payment.Value} {payment.Currency} {payment.Id}");
+                "Invoice {InvoiceId} received payment {Value} {Currency} {PaymentId} via {DetectionSource} at {ReceivedAt:O}",
+                invoice.Id, payment.Value, payment.Currency, payment.Id, detectionSource, DateTimeOffset.UtcNow);
 
 
             var prompt = invoice.GetPaymentPrompt(payment.PaymentMethodId);
@@ -185,6 +195,12 @@ namespace BTCPayServer.Plugins.ZCash.Services
 
                 addressIndexList.AddRange(expandedInvoice.ExistingPayments.Select(ep => ep.PaymentData.SubaddressIndex));
                 addressIndexList.Add(expandedInvoice.PaymentMethodDetails.AddressIndex);
+                var historicalAddresses = expandedInvoice.Invoice.Addresses
+                    .Where(a => a.PaymentMethodId == paymentId).Select(a => a.Address).ToList();
+                await using var receiverContext = await _dbContextFactory.CreateDbContextAsync();
+                addressIndexList.AddRange(await receiverContext.Receivers
+                    .Where(r => r.AccountIndex == expandedInvoice.PaymentMethodDetails.AccountIndex && historicalAddresses.Contains(r.UnifiedAddress))
+                    .Select(r => (long)r.AddressIndex).ToListAsync());
                 accountToAddressQuery[expandedInvoice.PaymentMethodDetails.AccountIndex] = addressIndexList;
             }
 
@@ -226,10 +242,11 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 {
                     await using var ctx = await _dbContextFactory.CreateDbContextAsync();
                     var ua = await ctx.Receivers.FirstOrDefaultAsync(r =>
-                        r.UnifiedAddress == transfer.Address ||
+                        r.AccountIndex == transfer.AccountIndex &&
+                        (r.UnifiedAddress == transfer.Address ||
                         r.SaplingAddress == transfer.Address ||
                         r.OrchardAddress == transfer.Address ||
-                        r.TransparentAddress == transfer.Address);
+                        r.TransparentAddress == transfer.Address));
                     if (ua == null) continue;
 
                     var invoice = await _invoiceRepository.GetInvoiceFromAddress(paymentId, ua.UnifiedAddress);
@@ -239,7 +256,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 }
 
                 var groupedByTxAndInvoice = transfersWithInvoice
-                    .GroupBy(t => (t.Transfer.TransactionId, t.Invoice.Id));
+                    .GroupBy(t => (t.Transfer.TransactionId, t.Invoice.Id, t.Transfer.AccountIndex, t.Transfer.AddressIndex));
 
                 foreach (var group in groupedByTxAndInvoice)
                 {
@@ -280,7 +297,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
         }
         
 
-        private async Task OnTransactionUpdated(string cryptoCode, string transactionHash, long accountIndex)
+        private async Task OnTransactionUpdated(string cryptoCode, string transactionHash, long accountIndex, string detectionSource)
         {
             var paymentMethodId = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
             var transfer = await _ZcashRpcProvider.WalletBackends[cryptoCode]
@@ -288,36 +305,18 @@ namespace BTCPayServer.Plugins.ZCash.Services
 
             var paymentsToUpdate = new List<(PaymentEntity Payment, InvoiceEntity invoice)>();
 
-            //group all destinations of the tx together and loop through the sets
-            foreach (var destination in transfer.Transfers.GroupBy(destination => destination.Address))
+            // All receiver forms for a diversifier share one payment identity.
+            foreach (var destination in transfer.Transfers.GroupBy(t => (t.AccountIndex, t.AddressIndex)))
             {
-                // await using var ctx = _dbContext;
                 await using var ctx = await _dbContextFactory.CreateDbContextAsync();
-
-                var ua = await ctx.Receivers.FirstOrDefaultAsync(r =>
-                    r.UnifiedAddress == destination.Key ||
-                    r.SaplingAddress == destination.Key ||
-                    r.OrchardAddress == destination.Key ||
-                    r.TransparentAddress == destination.Key);
-                if (ua == null)
-                    continue;
-
-                //find the invoice corresponding to this address, else skip
-                var invoice = await _invoiceRepository.GetInvoiceFromAddress(paymentMethodId, ua.UnifiedAddress);
-                if (invoice == null)
-                    continue;
-
-                var index = destination.First();
-
-                await HandlePaymentData(cryptoCode,
-                    destination.Key,
-                    destination.Sum(destination1 => destination1.Amount),
-                    index.AccountIndex,
-                    index.AddressIndex,
-                    transfer.TransactionId,
-                    transfer.Confirmations,
-                    transfer.Height
-                    , invoice, paymentsToUpdate);
+                var receiver = await ctx.Receivers.FirstOrDefaultAsync(r =>
+                    r.AccountIndex == destination.Key.AccountIndex && r.AddressIndex == destination.Key.AddressIndex);
+                if (receiver == null) continue;
+                var invoice = await _invoiceRepository.GetInvoiceFromAddress(paymentMethodId, receiver.UnifiedAddress);
+                if (invoice == null) continue;
+                await HandlePaymentData(cryptoCode, receiver.UnifiedAddress,
+                    destination.Sum(t => t.Amount), destination.Key.AccountIndex, destination.Key.AddressIndex,
+                    transfer.TransactionId, transfer.Confirmations, transfer.Height, invoice, paymentsToUpdate, detectionSource);
             }
 
             if (paymentsToUpdate.Any())
@@ -336,7 +335,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
         private async Task HandlePaymentData(string cryptoCode, string address, long totalAmount, long subaccountIndex,
             long subaddressIndex,
             string txId, long confirmations, long blockHeight, InvoiceEntity invoice,
-            List<(PaymentEntity Payment, InvoiceEntity invoice)> paymentsToUpdate)
+            List<(PaymentEntity Payment, InvoiceEntity invoice)> paymentsToUpdate, string detectionSource = "reconciliation")
         {
             var network = _networkProvider.GetNetwork(cryptoCode);
             var pmi = PaymentTypes.CHAIN.GetPaymentMethodId(network.CryptoCode);
@@ -376,12 +375,24 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 Currency = network.CryptoCode
             }.Set(invoice, handler, details);
 
+            var paymentBlob = paymentData.GetBlob();
+            paymentBlob.Destination = address;
+            paymentData.SetBlob(pmi, paymentBlob);
+
             if (alreadyExistingPaymentThatMatches == null)
             {
                 var payment = await _paymentService.AddPayment(paymentData, [txId]);
                 if (payment != null)
                 {
-                    await ReceivedPayment(invoice, payment);
+                    await ReceivedPayment(await _invoiceRepository.GetInvoice(invoice.Id), payment, detectionSource);
+                }
+                else
+                {
+                    // AddPayment also returns null for database write failures. Never checkpoint
+                    // a receipt unless its payment was actually persisted (possibly by another listener).
+                    var persisted = await _invoiceRepository.GetInvoice(invoice.Id);
+                    if (persisted == null || !GetAllZcashLikePayments(persisted, cryptoCode).Any(p => p.Id == paymentId))
+                        throw new InvalidOperationException($"Could not persist Zcash payment {paymentId}.");
                 }
             }
             else
@@ -410,6 +421,85 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 (_, SpeedPolicy.LowSpeed) => 6,
                 _ => 6,
             };
+
+        private async Task RecoverPayments(string cryptoCode, CancellationToken cancellationToken)
+        {
+            if (_ZcashRpcProvider.WalletBackends[cryptoCode] is not ZkoolGraphQlBackend backend)
+                return;
+
+            await using var accountContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+            var accounts = await accountContext.Receivers.Select(r => (long)r.AccountIndex)
+                .Distinct().ToListAsync(cancellationToken);
+            foreach (var account in accounts)
+            {
+                try
+                {
+                    await RecoverAccountPayments(cryptoCode, backend, account, cancellationToken);
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Leave this cursor unchanged and continue recovering independent accounts.
+                    _logger.LogError(ex, "[{CryptoCode}] Payment recovery failed for account {Account}", cryptoCode, account);
+                }
+            }
+        }
+
+        private async Task RecoverAccountPayments(string cryptoCode, ZkoolGraphQlBackend backend,
+            long account, CancellationToken cancellationToken)
+        {
+            await using var strategyContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+            await strategyContext.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+            {
+                var paymentMethodId = PaymentTypes.CHAIN.GetPaymentMethodId(cryptoCode);
+                await using var ctx = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+                await using var transaction = await ctx.Database.BeginTransactionAsync(cancellationToken);
+                // Serialize recovery for an account across listener/server instances. Payment writes
+                // use separate contexts; a crash before the cursor commit safely replays them.
+                await ctx.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock({802469321}, {checked((int)account)})", cancellationToken);
+                var cursor = await ctx.RecoveryCursors.SingleOrDefaultAsync(c =>
+                    c.CryptoCode == cryptoCode && c.AccountIndex == account, cancellationToken);
+                var height = await backend.SynchronizeAsync(new[] { account }, cancellationToken);
+                // Replay a small overlap, including the saved height, for same-block late discovery
+                // and shallow reorganizations. Existing payment IDs make this idempotent.
+                var fromHeight = Math.Max(0, Math.Min(cursor?.Height ?? 0, height) - 100);
+                var receivers = await ctx.Receivers.Where(r => r.AccountIndex == account)
+                    .ToListAsync(cancellationToken);
+                var transfers = await backend.GetTransfersByHeightAsync(account, fromHeight,
+                    receivers.Select(r => (long)r.AddressIndex).Distinct().ToArray(), cancellationToken);
+                var updates = new List<(PaymentEntity Payment, InvoiceEntity Invoice)>();
+                var recoveredInvoices = new HashSet<string>();
+                // Filter each note's receiver before grouping: an internal/change note may share
+                // a diversifier index with an invoice, but must neither be credited nor hide its receipt.
+                var matched = transfers.Where(t => t.Height > 0 && t.Height <= height)
+                    .Select(t => (Transfer: t, Receiver: receivers.FirstOrDefault(r =>
+                        r.AddressIndex == t.AddressIndex && (t.Address == r.UnifiedAddress ||
+                        t.Address == r.SaplingAddress || t.Address == r.OrchardAddress || t.Address == r.TransparentAddress))))
+                    .Where(t => t.Receiver != null);
+                foreach (var group in matched.GroupBy(t =>
+                    (t.Transfer.TransactionId, t.Transfer.AccountIndex, t.Transfer.AddressIndex)))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var receiver = group.First().Receiver;
+                    var invoice = await _invoiceRepository.GetInvoiceFromAddress(paymentMethodId, receiver.UnifiedAddress);
+                    if (invoice == null) continue; // A reserved address may never have become an invoice.
+                    var first = group.First().Transfer;
+                    await HandlePaymentData(cryptoCode, receiver.UnifiedAddress, group.Sum(t => t.Transfer.Amount),
+                        account, first.AddressIndex, first.TransactionId, first.Confirmations, first.Height, invoice, updates);
+                    recoveredInvoices.Add(invoice.Id);
+                }
+                await _paymentService.UpdatePayments(updates.Select(u => u.Payment).ToList());
+                foreach (var invoiceId in recoveredInvoices)
+                    _eventAggregator.Publish(new InvoiceNeedUpdateEvent(invoiceId));
+                if (cursor == null)
+                {
+                    cursor = new ZcashRecoveryCursor { CryptoCode = cryptoCode, AccountIndex = account };
+                    ctx.RecoveryCursors.Add(cursor);
+                }
+                cursor.Height = height;
+                await ctx.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+            });
+        }
 
         private async Task UpdateAnyPendingZcashLikePayment(string cryptoCode)
         {

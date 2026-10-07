@@ -71,7 +71,7 @@ mutation($idAccounts: [Int!]!) {
             });
 
         // return payResult["pay"]?.Value<long>() ?? 0;
-        var txId = payResult["pay"]!.Value<string>();
+        var txId = ZkoolGraphQlClient.RequireTransactionId(payResult["pay"]);
         return new ICheckoutCheatModeExtension.PayInvoiceResult(txId);
     }
 

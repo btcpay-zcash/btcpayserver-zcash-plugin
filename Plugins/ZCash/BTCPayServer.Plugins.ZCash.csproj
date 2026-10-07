@@ -19,7 +19,7 @@
   </PropertyGroup>
 
   <!-- This will make sure that referencing BTCPayServer doesn't put any artifact in the published directory -->
-  <ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)' == 'Release'">
     <ProjectReference>
       <Properties>StaticWebAssetsEnabled=false</Properties>
       <Private>false</Private>
@@ -27,20 +27,6 @@
     </ProjectReference>
   </ItemDefinitionGroup>
 
-
-  <!-- If you need Entity Framework, you can uncomment this. This will make it usable in your project without publishing assemblies
-  already referenced by BTCPay Server Core project -->
-  <!--
-  <ItemGroup Condition="$(Configuration) != 'Release'">
-    <PackageReference Include="Microsoft.CodeAnalysis.Common" Version="4.9.2" />
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.9.2" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.5">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
-  </ItemGroup>
-  -->
 
   <!-- If you reference another project, by default, the dlls won't be copied in the published plugin, you need <Private>true</Private> -->
   <!--
@@ -53,6 +39,15 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\btcpayserver\BTCPayServer\BTCPayServer.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Configuration)' != 'Release'">
+    <!-- Match BTCPayServer.Rating's Roslyn version to avoid EF Design's 5.0/5.3 conflict. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.3.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="5.3.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.4">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="GraphQL.Client" Version="6.1.0" />

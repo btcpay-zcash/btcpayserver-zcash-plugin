@@ -2,10 +2,7 @@
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
-# A new receiver per real run avoids crediting deposits from earlier test invoices.
-if [ "${BTCPAY_TEST_WALLET:-auto}" != mock ] && curl --max-time 3 -fsS -H 'Content-Type: application/json' -d '{"query":"query { currentHeight }"}' http://127.0.0.1:18082/graphql >/dev/null; then
-  "$REPO_ROOT/../zcash-regtest/scripts/prepare-test-wallet.py" --new
-fi
+# Each real browser case creates its own receiver through the cashcow GraphQL API.
 if [ -f "$REPO_ROOT/../zcash-regtest/data/local/current.env" ]; then
   source "$REPO_ROOT/../zcash-regtest/data/local/current.env"
 fi

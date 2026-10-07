@@ -14,11 +14,17 @@ public class ZcashPluginDbContext : DbContext
     }
 
     public DbSet<ZcashReceiver> Receivers { get; set; }
+    public DbSet<ZcashRecoveryCursor> RecoveryCursors { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
         modelBuilder.HasDefaultSchema("BTCPayServer.Plugins.ZCash");
+
+        modelBuilder.Entity<ZcashRecoveryCursor>(b =>
+        {
+            b.HasKey(e => new { e.CryptoCode, e.AccountIndex });
+        });
 
         modelBuilder.Entity<ZcashReceiver>(b =>
         {
