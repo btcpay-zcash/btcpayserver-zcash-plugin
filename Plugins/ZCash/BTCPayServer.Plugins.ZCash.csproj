@@ -8,7 +8,7 @@
   <PropertyGroup>
     <Product>BTCPay Server: ZCash support plugin</Product>
     <Description>This plugin extends BTCPay Server to enable users to receive payments via ZCash.</Description>
-    <Version>1.0.4</Version>
+    <Version>1.0.5</Version>
   </PropertyGroup>
 
   <!-- Plugin development properties -->
