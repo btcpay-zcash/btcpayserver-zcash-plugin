@@ -108,6 +108,9 @@ query {
 
         public async Task<WalletAccountCreationResult> CreateAccountAsync(WalletAccountCreationRequest request, CancellationToken cancellationToken = default)
         {
+            // Temporarily disabled: deployed zkool builds may not expose Account.ufvk.
+            // Store-level viewing-key hash checks still prevent sharing keys across stores.
+            /*
             var existing = await _graphQlClient.SendAsync("query { accounts { id name ufvk } }", cancellationToken: cancellationToken);
             var matching = existing["accounts"]?.FirstOrDefault(a => a["ufvk"]?.Value<string>() == request.Key?.Trim());
             if (matching != null)
@@ -117,6 +120,7 @@ query {
                 // Recover an import whose store save failed without creating another wallet account.
                 return new WalletAccountCreationResult { AccountIndex = matching["id"]!.Value<long>() };
             }
+            */
 
             var data = await _graphQlClient.SendAsync(@"
 mutation($newAccount: NewAccount!) {

@@ -251,7 +251,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                                     BirthHeight = viewModel.BirthHeight,
                                     Label = $"store:{StoreData.Id}"
                             });
-                        // Backend retries recover the account by key and store label if this save fails.
+                            // Persist the account reference after the wallet import succeeds.
                         config.AccountIndex = newAccount.AccountIndex;
                         config.ViewingKeyHash = keyHash;
                         config.ViewingKey = null;
