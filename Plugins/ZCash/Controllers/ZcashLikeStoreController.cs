@@ -32,6 +32,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.Extensions.Localization;
+using Microsoft.Extensions.Logging;
 
 namespace BTCPayServer.Plugins.ZCash.Controllers
 {
@@ -47,11 +48,13 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
         private readonly PaymentMethodHandlerDictionary _handlers;
         private IStringLocalizer StringLocalizer { get; }
         private readonly ZcashPluginDbContextFactory _dbContextFactory;
+        private readonly ILogger<UIZcashLikeStoreController> _logger;
 
         public UIZcashLikeStoreController(ZcashLikeConfiguration ZcashLikeConfiguration,
             StoreRepository storeRepository, ZcashRPCProvider ZcashRpcProvider,
             PaymentMethodHandlerDictionary handlers,
-            IStringLocalizer stringLocalizer, ZcashPluginDbContextFactory dbContextFactory)
+            IStringLocalizer stringLocalizer, ZcashPluginDbContextFactory dbContextFactory,
+            ILogger<UIZcashLikeStoreController> logger)
         {
             _ZcashLikeConfiguration = ZcashLikeConfiguration;
             _StoreRepository = storeRepository;
@@ -59,6 +62,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             _handlers = handlers;
             StringLocalizer = stringLocalizer;
             _dbContextFactory = dbContextFactory;
+            _logger = logger;
         }
 
         public StoreData StoreData => HttpContext.GetStoreData();
@@ -223,26 +227,29 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                         var keyHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key)));
                         // Serialize imports across requests and server instances sharing this database.
                         await using var db = _dbContextFactory.CreateContext();
-                        await using var importLock = await db.Database.BeginTransactionAsync();
-                        await db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(802469320125)");
-                        var stores = await _StoreRepository.GetStores();
-                        foreach (var existingStore in stores)
+                        long createdAccountIndex = 0;
+                        await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
                         {
-                            var existing = existingStore.GetPaymentMethodConfig<ZcashPaymentMethodConfig>(pmi, _handlers);
-                            if (existingStore.Id == store.Id && existing?.AccountIndex != null)
-                                throw new InvalidOperationException("This store already has an account configured.");
-                            var existingHash = existing?.ViewingKeyHash;
-                            if (existingHash == null && !string.IsNullOrWhiteSpace(existing?.ViewingKey))
-                                existingHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(existing.ViewingKey.Trim())));
-                            if (existingHash == keyHash)
-                                throw new InvalidOperationException("This viewing key is already assigned to a store. Use a different viewing key.");
-                        }
-                        var newAccount = await _ZcashRpcProvider.WalletBackends[cryptoCode]
-                            .CreateAccountAsync(new WalletAccountCreationRequest
+                            await using var importLock = await db.Database.BeginTransactionAsync();
+                            await db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(802469320125)");
+                            var stores = await _StoreRepository.GetStores();
+                            foreach (var existingStore in stores)
                             {
-                                Key = key,
-                                BirthHeight = viewModel.BirthHeight,
-                                Label = $"store:{StoreData.Id}"
+                                var existing = existingStore.GetPaymentMethodConfig<ZcashPaymentMethodConfig>(pmi, _handlers);
+                                if (existingStore.Id == store.Id && existing?.AccountIndex != null)
+                                    throw new InvalidOperationException("This store already has an account configured.");
+                                var existingHash = existing?.ViewingKeyHash;
+                                if (existingHash == null && !string.IsNullOrWhiteSpace(existing?.ViewingKey))
+                                    existingHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(existing.ViewingKey.Trim())));
+                                if (existingHash == keyHash)
+                                    throw new InvalidOperationException("This viewing key is already assigned to a store. Use a different viewing key.");
+                            }
+                            var newAccount = await _ZcashRpcProvider.WalletBackends[cryptoCode]
+                                .CreateAccountAsync(new WalletAccountCreationRequest
+                                {
+                                    Key = key,
+                                    BirthHeight = viewModel.BirthHeight,
+                                    Label = $"store:{StoreData.Id}"
                             });
                         // Backend retries recover the account by key and store label if this save fails.
                         config.AccountIndex = newAccount.AccountIndex;
@@ -252,11 +259,13 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                         store.SetPaymentMethodConfig(_handlers[pmi], config);
                         await _StoreRepository.UpdateStore(store);
                         await importLock.CommitAsync();
+                        createdAccountIndex = newAccount.AccountIndex;
+                        });
                         TempData.SetStatusMessageModel(new StatusMessageModel
                         {
                             Severity = StatusMessageModel.StatusSeverity.Success,
                             Message = StringLocalizer["Account #{0} created for this store.",
-                                newAccount.AccountIndex].Value
+                                createdAccountIndex].Value
                         });
                         return RedirectToAction(nameof(GetStoreZcashLikePaymentMethod),
                             new { storeId = StoreData.Id, cryptoCode });
@@ -265,8 +274,15 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                     {
                         ModelState.AddModelError(nameof(viewModel.WalletPassword), ex.Message);
                     }
-                    catch (Exception)
+                    catch (ZkoolGraphQlClient.GraphQlApiException ex)
                     {
+                        _logger.LogError(ex, "GraphQL wallet account creation failed for store {StoreId}", store.Id);
+                        ModelState.AddModelError(nameof(viewModel.WalletPassword),
+                            StringLocalizer["Could not create a new account: {0}", ex.Message]);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Wallet account creation failed for store {StoreId}", store.Id);
                         ModelState.AddModelError(nameof(viewModel.WalletPassword), StringLocalizer["Could not create a new account."]);
                     }
                 }
