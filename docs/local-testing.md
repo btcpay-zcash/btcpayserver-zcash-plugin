@@ -1,0 +1,262 @@
+# Local testing without Docker
+
+For plugin schema changes, see [Generating database migrations](database-migrations.md).
+
+Requirements: .NET SDK 10, Git, curl, and PostgreSQL 16. On macOS:
+
+```sh
+brew install postgresql@16
+git submodule update --init --recursive
+./scripts/run-local.sh
+```
+
+Open http://127.0.0.1:14142 and register the first administrator. Create a store,
+open its Zcash wallet settings, create a mock account (any test label/key), select
+that account, and enable ZEC. Use a fixed rate rule such as `ZEC_USD = 30` for
+repeatable USD invoices without an external exchange. Create an invoice, open
+checkout, and use the cheatmode payment/mining controls. The plugin's existing
+poller checks for transactions and blocks every ten seconds.
+
+The launcher builds and loads the plugin via `DEBUG_PLUGINS`, selects regtest and
+ZEC only, and bypasses BTCPay's Bitcoin launch profile. No Bitcoin node,
+NBXplorer, Zebra, lightwalletd, or real zkool instance is required.
+
+The mock listens on loopback port 18080 and implements the subset of GraphQL
+operations used for account creation, address allocation, wallet status, balances,
+transactions and cheatmode payment. `/rpc` implements `generate`. It starts with a
+funded cashcow account (ID 1), so BTCPay does not need to mine real coinbase funds.
+Unsupported operations return errors rather than silently succeeding. WebSocket
+subscriptions stay idle; the mock records active subscriptions for lifecycle tests.
+Payment detection uses the polling integration.
+
+Mock addresses (`uregtest-mock-…`) and transactions are synthetic. This validates
+application plumbing, not Zcash address validity, cryptography, fees, spending
+rules, chain synchronization, or real zkool schema compatibility. Do not send real
+funds. The mock wallet is in memory and resets each run; BTCPay's database persists.
+After restarting the mock, create fresh mock accounts/wallet settings and invoices.
+
+PostgreSQL uses `dev/data/postgres`, loopback port 15432, role `btcpay`, and database
+`btcpay_zcash_local`. This isolated local cluster uses trust authentication and is
+only for development. `Ctrl-C` stops BTCPay and the mock; stop PostgreSQL separately:
+
+```sh
+./scripts/local-postgres.sh stop
+```
+
+Set `PG_BIN` to a directory containing PostgreSQL tools if they are not installed
+through Homebrew. Set `BTCPAY_POSTGRES` before launch to use another development
+database (the launcher still starts the local cluster).
+
+## Integration tests
+
+```sh
+dotnet test tests/BTCPayServer.Plugins.ZCash.IntegrationTests/BTCPayServer.Plugins.ZCash.IntegrationTests.csproj
+```
+
+These initial xUnit HTTP integration tests need neither Docker nor PostgreSQL nor
+a separately running server. Each test starts an isolated mock on an ephemeral
+loopback port and uses the real plugin GraphQL/RPC clients, wallet backend, summary
+provider, polling and checkout cheatmode extension. They verify payment amount
+conversion, unconfirmed transaction detection, mining, confirmation counts and
+address filtering, partial payments to old/new addresses, repeated missed-event
+notifications, recovery of spent receipts after restart, multiple outputs without
+double counting, account subscription discovery after startup, duplicate-key
+rejection/import retry, and rejection of invalid transaction IDs returned by the
+wallet, plus unsupported operations/invalid mining.
+The separate Playwright test below covers browser UI, database address persistence
+and full invoice settlement through BTCPay's listener.
+
+The fixture/project structure references the
+[Monero plugin integration-test branch](https://github.com/btcpay-monero/btcpayserver-monero-plugin/tree/integration-test).
+That branch uses BTCPay's `UnitTestBase` and Playwright with Docker-backed services.
+Here the first stage substitutes isolated mock HTTP services, allowing its testing
+pattern and our existing cheatmode to be used on a macOS VM without Docker. The browser suite below launches the full server against these mocks. Real regtest
+coverage can replace mock endpoints with zkool/Zebra instances.
+
+## Playwright checkout coverage
+
+```sh
+./scripts/test-playwright.sh
+```
+
+The runner starts the local PostgreSQL cluster and installs Playwright's matching
+Chromium browser (cached after the first run). The browser test starts a separate
+BTCPay process and mock wallet on private loopback ports, creates a temporary
+`zec_ui_*` database, and drops that database and stops both servers on completion.
+It leaves existing local BTCPay stores and wallets untouched.
+
+The flow registers an administrator, creates a store, creates its mock wallet
+account, enables ZEC with a two-confirmation settlement threshold, creates a
+0.1 ZEC invoice, and pays it through checkout cheatmode. It verifies the merchant
+status is Processing before mining, remains Processing after one block, and
+becomes Settled after the second block, then checks the customer checkout. The
+suite repeats this for overpayment and partial payment followed by the remaining
+checkout amount (including the configured fee) to either the rotated or original
+address. On real regtest the first partial payment is mined before sending the
+remainder so the cashcow's change is spendable; both payments still require their
+configured confirmations. It also checks empty-key validation and duplicate viewing-key rejection
+after the original store saves its settings.
+Using a ZEC-denominated invoice avoids external exchange-rate dependencies.
+
+The browser test is opt-in: normal `dotnet test` runs the HTTP tests and reports
+the browser test as skipped. Set `BTCPAY_RUN_PLAYWRIGHT=1` to enable it directly.
+Set `BTCPAY_TEST_POSTGRES` to an administrative development PostgreSQL connection
+string if using a different cluster; its user needs CREATE DATABASE privileges.
+To use an already installed Chrome instead of downloading Chromium:
+
+```sh
+BTCPAY_PLAYWRIGHT_INSTALL=0 BTCPAY_PLAYWRIGHT_CHANNEL=chrome ./scripts/test-playwright.sh
+```
+
+Server logs and isolated server configuration are saved under
+`TestResults/playwright/<run-id>/`. A failed browser flow also saves `failure.png`
+and a Playwright `trace.zip`. These artifacts are ignored by Git. This test still
+uses synthetic Zcash data; it does not replace real regtest chain coverage.
+
+## Real local regtest (no Docker)
+
+Install Rust/Cargo, Go, Python 3, Git and clang/libclang (`brew install go llvm`
+plus Xcode command-line tools on macOS; `apt install clang libclang-dev` on Linux).
+The wallet source defaults to the sibling `../zkool2` checkout; set `ZKOOL_SOURCE`
+to use another checkout. From the sibling `zcash-regtest` repository:
+
+```sh
+./scripts/install-tools.sh
+./scripts/regtest.sh start
+# After “Regtest ready”, in another terminal, from the plugin repository:
+./scripts/test-playwright.sh
+```
+
+The installer pins Zebra v6.2.1 with `internal-miner` and the lightwalletd revision
+from the reference action, and builds zkool_graphql from local source with its
+workspace patches. Binaries live in ignored `zcash-regtest/tools/bin` and can be reused;
+the launcher also accepts binaries already on PATH. Go is needed for lightwalletd;
+Cargo alone does not build the full stack. The wallet may download Sapling proving
+parameters on first startup.
+
+Each launch creates fresh state under `zcash-regtest/data/local/run-*`, binds Zebra RPC
+18232, Zebra P2P 18233, lightwalletd 8137 and main GraphQL 18081 and cashcow GraphQL 18082 on loopback, and keeps
+logs there. It refuses occupied ports and stops only its own processes on Ctrl-C.
+It mines 300 blocks with NU6.3 activating at 250 (matching local zkool2).
+BTCPay's existing `CreateTestWalletAsync`/`MakeCashCowFat` path creates cashcow
+account 1 and the miner, mines mature coinbase, shields it and synchronizes the
+cashcow. The browser fixture supplies the matching public test miner seed.
+Checkout cheatmode handles invoice payments and further mining.
+
+The Playwright test defaults to `BTCPAY_TEST_WALLET=auto`: it uses the reachable
+regtest GraphQL server, otherwise starts its isolated mock. A reachable unhealthy
+stack fails rather than silently falling back. Use `BTCPAY_TEST_WALLET=regtest`
+to require the real stack, or `BTCPAY_TEST_WALLET=mock` to force the mock.
+`BTCPAY_TEST_GRAPHQL`, `BTCPAY_TEST_CASHCOW_GRAPHQL` and `BTCPAY_TEST_ZEBRA_RPC` override the test endpoints.
+The real browser flow imports a generated receiving viewing key and exercises
+the same payment and two-confirmation settlement assertions. Run browser tests
+serially against this shared chain; each run creates another receiving account.
+The HTTP tests retain their isolated mock, including synthetic-key assertions.
+
+Start BTCPay with `scripts/run-local.sh` once to fund the cashcow, then run
+`zcash-regtest/scripts/prepare-test-wallet.py`. This creates a separate receiver account in
+the cashcow instance and saves its seed and UFVK in ignored
+`zcash-regtest/data/local/current.env` (mode 0600). The browser fixture generates a fresh receiver through GraphQL for each real test
+case. Receivers created manually by the preparation script also have a saved
+`receiver-<id>.env` file. In the local UI, paste `BTCPAY_TEST_VIEWING_KEY` into “Wallet Viewing Key”;
+the main wallet imports a watch-only account. The spending seed stays in cashcow.
+Use `zcash-regtest/scripts/regtest.sh start|stop|status` to manage the local stack.
+Starting resumes its last state; `start --state-dir <existing-run-directory>` selects
+another saved run after stopping.
+
+## Payment notification recovery and legacy migration
+
+WebSocket notifications are the low-latency path. Every ten seconds the GraphQL
+poller republishes mempool transactions and requests reconciliation, including on
+startup and at an unchanged block height. A plugin database migration adds a
+recovery cursor per cryptocurrency/account. Recovery synchronizes accounts with
+stored receivers, scans confirmed transaction history from the saved height with
+a 100-block replay overlap, and resolves receipts against all stored invoice
+addresses, including expired/settled invoices. A missing cursor scans from height
+zero. The cursor advances only after receipt processing and payment writes succeed;
+failures leave it unchanged and do not stop recovery of other accounts. PostgreSQL
+advisory locks serialize recovery across server instances. Payment identities
+(transaction ID, wallet account ID and diversifier index) make replay idempotent.
+
+The existing monitored-invoice reconciliation remains responsible for mempool
+receipts and confirmation updates. History queries retain receipts already spent
+by the merchant. This uses zkool's existing `synchronize` and
+`transactionsByAccount(height:)` operations; no zkool GraphQL schema change is
+required. It recovers after wallet downtime but is not an independent fallback
+while that wallet is unavailable. The replay overlap does not implement full
+rollback of payments removed by a chain reorganization.
+
+The mock-backed `offline-expired` browser case stops BTCPay detection, pays and
+mines while it is stopped, restarts with the wallet unavailable until the invoice
+expires, and then restores the wallet. It also injects a PostgreSQL payment-write
+failure to verify the cursor remains unchanged, checks the recovered transaction's
+account/diversifier and amount, and restarts again to check persistent, idempotent
+replay. It uses an isolated database and mock wallet even when regtest is available.
+
+New store imports persist a SHA-256 fingerprint of the trimmed viewing key rather
+than the key itself. A PostgreSQL advisory lock serializes store imports across
+server instances, and the wallet is checked for keys imported before fingerprints
+were introduced. The wallet still needs the actual viewing key for scanning. This
+prevents identical keys from being assigned to different stores; it is not a proof
+that different partial viewing keys cannot contain overlapping receiver keys.
+
+Recommended next migration step: an explicit administrator action to import the
+legacy config.json viewing key into the selected store, showing the destination
+store and original birth height before import. Reuse the duplicate-key checks,
+rescan from that birth height, and preserve the legacy config and wallet until
+verification succeeds. Importing the key alone does not migrate invoice/address
+ownership: legacy account IDs, diversifier indices and receiver-to-invoice mappings
+must also be reconciled before retiring the old backend. Starting a fresh receiving
+wallet is suitable for future invoices only; old invoice addresses still require
+monitoring. The one-time migration UI is not implemented yet.
+
+## Subscription latency tracing
+
+zkool's `pay` mutation broadcasts the signed transaction and returns its txid.
+Its receiver event is emitted separately: the lightwalletd mempool stream supplies
+transaction bytes, zkool decrypts the notes, stores them in `MEMPOOL.unconfirmed`,
+and publishes `TX` to the account's subscription. BTCPay then fetches transaction
+receipts and persists the payment. Events can arrive before the mutation response.
+
+zkool logs broadcast completion and TX publication with their account and txid;
+publication includes the subscriber count. Start its local stack with `RUST_LOG=info`
+to capture those timestamps. Initial monitor setup failures are logged and retried
+after five seconds.
+The plugin logs subscription receipt and payment persistence timestamps with the
+same txid. The payment log identifies `subscription`, `poll`, or `reconciliation`.
+The listener queue and database/network work are included in the interval between
+subscription receipt and payment persistence.
+
+The client disables native WebSocket keepalives: Juniper's Warp adapter parses
+native pong frames as GraphQL JSON and closes the connection at .NET's default
+30-second interval. Juniper's GraphQL-level heartbeats remain enabled. The real
+`RealZkoolSubscriptionStillReceivesPaymentsAfterIdleConnection` test waits 40
+seconds before paying to guard against this disconnect and polling fallback.
+
+```sh
+# Deterministic full-listener test: mock WebSocket delivery, polling discovery hidden.
+BTCPAY_RUN_PLAYWRIGHT=1 BTCPAY_TEST_WALLET=mock BTCPAY_PLAYWRIGHT_INSTALL=0 \
+  dotnet test tests/BTCPayServer.Plugins.ZCash.IntegrationTests/BTCPayServer.Plugins.ZCash.IntegrationTests.csproj -m:1 \
+  --filter 'Category=Playwright&DisplayName~subscription-latency' \
+  --logger 'console;verbosity=detailed'
+
+# Real zkool/node timing, with the local regtest stack running.
+BTCPAY_RUN_PLAYWRIGHT=1 BTCPAY_TEST_WALLET=regtest BTCPAY_PLAYWRIGHT_INSTALL=0 \
+  dotnet test tests/BTCPayServer.Plugins.ZCash.IntegrationTests/BTCPayServer.Plugins.ZCash.IntegrationTests.csproj -m:1 \
+  --filter 'FullyQualifiedName~RealZkoolSubscriptionPersistsPaymentWithinTwoSeconds' \
+  --logger 'console;verbosity=detailed'
+```
+
+Both tests require the first persisted receipt to come from a subscription, match
+the invoice's account/diversifier and amount, and appear exactly once. They assert
+a two-second subscription-callback-to-persistence budget. The mock also asserts
+two seconds from mutation request to observed persistence. The real test reports
+the complete mutation-to-receipt time separately because signing, broadcasting,
+and node/mempool propagation are outside BTCPay's processing budget. Detailed test
+output contains the timestamps and measured intervals.
+
+A local regtest run on 2026-10-06 measured 4.39 seconds for signing/broadcasting,
+34 ms from broadcast completion to zkool TX publication, 1 ms for WebSocket
+delivery, and 176 ms from BTCPay's subscription callback to payment persistence.
+These are observations from one run; the tests enforce the BTCPay processing
+budget separately from upstream transaction creation and propagation.

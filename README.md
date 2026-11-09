@@ -1,4 +1,4 @@
-# ZCash support plugin
+# Zcash support plugin
 
 This plugin extends BTCPayServer to enable users to receive payments via Zcash.
 
@@ -10,6 +10,17 @@ This plugin extends BTCPayServer to enable users to receive payments via Zcash.
 ### Installing the Plugin
 
 [docs/installation.md](./docs/installation.md)
+
+## Local development and integration tests
+
+For Docker-free local testing with mock zkool/mining endpoints and the existing
+checkout cheatmode, see [docs/local-testing.md](docs/local-testing.md).
+
+```sh
+./scripts/run-local.sh
+./scripts/test-playwright.sh
+dotnet test tests/BTCPayServer.Plugins.ZCash.IntegrationTests/BTCPayServer.Plugins.ZCash.IntegrationTests.csproj
+```
 
 ## Full Node
 
@@ -62,7 +73,7 @@ You will need to create this file:
 
 ```json
 {
-  "DEBUG_PLUGINS": "/<absolute-path-to-repo>/btcpayserver-zcash-plugin/Plugins/ZCash/bin/Debug/net8.0/BTCPayServer.Plugins.ZCash.dll",
+  "DEBUG_PLUGINS": "/<absolute-path-to-repo>/btcpayserver-zcash-plugin/Plugins/ZCash/bin/Debug/net10.0/BTCPayServer.Plugins.ZCash.dll",
   "ZEC_DAEMON_URI": "http://127.0.0.1:8001",
   "ZEC_WALLET_DAEMON_URI": "http://127.0.0.1:8001",
   "ZEC_WALLET_DAEMON_WALLETDIR": "/<absolute-path-to-repo>/btcpayserver-zcash-plugin/dev/wallet_datadir",
