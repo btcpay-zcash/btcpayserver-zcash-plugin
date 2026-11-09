@@ -90,6 +90,10 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 // Cancellation is expected when stopping the wallet loops or
                 // when the host's graceful shutdown deadline expires.
             }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logs.PayServer.LogError(ex, "Wallet event loop failed while stopping");
+            }
             finally
             {
                 _cts?.Dispose();
