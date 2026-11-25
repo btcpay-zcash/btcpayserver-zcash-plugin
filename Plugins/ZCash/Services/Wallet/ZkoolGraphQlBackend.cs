@@ -10,6 +10,7 @@ using BBTCPayServer.Plugins.ZCash.RPC;
 using BTCPayServer.Plugins.ZCash.Configuration;
 using BTCPayServer.Plugins.ZCash.Data;
 using BTCPayServer.Plugins.ZCash.Data.Models;
+using BTCPayServer.Plugins.ZCash.Payments;
 using BTCPayServer.Plugins.ZCash.RPC;
 using BTCPayServer.Services;
 using GraphQL;
@@ -25,20 +26,19 @@ namespace BTCPayServer.Plugins.ZCash.Services
         private readonly SemaphoreSlim _pollingLock = new SemaphoreSlim(1, 1);
         private long? _lastKnownHeight;
         private readonly ZcashPluginDbContextFactory _dbContextFactory;
-        // private readonly ILogger<ZkoolGraphQlBackend> _logger;
+        private readonly ILogger<ZkoolGraphQlBackend> _logger;
         
         public ZkoolGraphQlBackend(string cryptoCode,
             ZkoolGraphQlClient graphQlClient,
             ZcashPluginDbContextFactory dbContextFactory,
-            BTCPayServerEnvironment environment
-            // ILogger<ZkoolGraphQlBackend> logger
-        )
+            BTCPayServerEnvironment environment,
+            ILogger<ZkoolGraphQlBackend> logger)
         {
             CryptoCode = cryptoCode;
             _graphQlClient = graphQlClient;
             _dbContextFactory = dbContextFactory;
             this.environment = environment;
-            // _logger = logger;
+            _logger = logger;
         }
 
         public string CryptoCode { get; }
@@ -47,7 +47,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
 
         public async Task<WalletSyncStatus> GetSyncStatusAsync(CancellationToken cancellationToken = default)
         {
-          Console.WriteLine($"Start GraphQL GetSyncStatusAsync");
+            _logger.LogDebug("Checking GraphQL wallet sync status for {CryptoCode}", CryptoCode);
             var result = new WalletSyncStatus();
             try
             {
@@ -58,13 +58,13 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 result.Synced = currentHeight > 0;
                 result.DaemonAvailable = true;
                 result.WalletAvailable = true;
-                Console.WriteLine($"GetCurrentHeightAsync SUCCESS {result.CurrentHeight}");
+                _logger.LogDebug("GraphQL wallet height for {CryptoCode} is {CurrentHeight}", CryptoCode, currentHeight);
 
-                await GetAccountsAsync(cancellationToken);
+                await _graphQlClient.SendAsync("query { accounts { id } }", cancellationToken: cancellationToken);
             }
-            catch(Exception e)
+            catch (Exception e)
             {
-              Console.WriteLine($"GetSyncStatusAsync THREW: ${e}");
+                _logger.LogDebug(e, "Failed to get GraphQL wallet sync status for {CryptoCode}", CryptoCode);
                 result.WalletAvailable = false;
                 result.DaemonAvailable = result.CurrentHeight > 0;
                 result.Synced = false;
@@ -108,48 +108,87 @@ query {
 
         public async Task<WalletAccountCreationResult> CreateAccountAsync(WalletAccountCreationRequest request, CancellationToken cancellationToken = default)
         {
-            // Temporarily disabled: deployed zkool builds may not expose Account.ufvk.
-            // Store-level viewing-key hash checks still prevent sharing keys across stores.
-            /*
-            var existing = await _graphQlClient.SendAsync("query { accounts { id name ufvk } }", cancellationToken: cancellationToken);
-            var matching = existing["accounts"]?.FirstOrDefault(a => a["ufvk"]?.Value<string>() == request.Key?.Trim());
-            if (matching != null)
+            HashSet<string> components;
+            try
             {
-                if (matching["name"]?.Value<string>() != request.Label)
-                    throw new InvalidOperationException("This viewing key is already imported by another account. Use a different viewing key.");
-                // Recover an import whose store save failed without creating another wallet account.
-                return new WalletAccountCreationResult { AccountIndex = matching["id"]!.Value<long>() };
+                components = ZcashViewingKey.ReceivingComponents(request.Key, environment.NetworkType);
             }
-            */
-
-            var data = await _graphQlClient.SendAsync(@"
-mutation($newAccount: NewAccount!) {
-  createAccount(newAccount: $newAccount)
-}", new
+            catch (FormatException)
             {
-                newAccount = new
+                throw new InvalidOperationException("Enter a unified full viewing key for this network.");
+            }
+
+            var key = request.Key.ToLowerInvariant();
+            var label = request.Label + ":" + ZcashPaymentMethodConfig.HashViewingKey(key);
+            // The controller holds the database-wide import lock through the store update.
+            // The fingerprinted label also makes retries after an uncertain RPC response safe.
+            var accounts = await ReadWalletKeysAsync(cancellationToken);
+            var existing = accounts.SingleOrDefault(a => a.Label == label);
+            foreach (var account in accounts)
+            {
+                if (account == existing && account.Key == key) continue;
+                if (account.Label == request.Label || account.Label.StartsWith(request.Label + ":", StringComparison.Ordinal) ||
+                    components.Overlaps(ZcashViewingKey.ReceivingComponents(account.Key, environment.NetworkType, walletExport: true)))
+                    throw new InvalidOperationException("This store or viewing key is already assigned to a wallet account.");
+            }
+
+            if (existing != null)
+                return new WalletAccountCreationResult { AccountIndex = existing.Id };
+
+            var data = await _graphQlClient.SendAsync(
+                "mutation($a: NewAccount!) { createAccount(newAccount: $a) }",
+                new { a = new { name = label, key, aindex = 0, birth = request.BirthHeight, useInternal = false } }, cancellationToken);
+            var id = data["createAccount"]?.Value<int>();
+            if (id is not > 0) throw new InvalidOperationException("The wallet did not return a receiving account.");
+            var exported = await _graphQlClient.SendAsync(
+                "query($id: Int!) { unifiedFullViewingKey(idAccount: $id) }", new { id }, cancellationToken);
+            if (exported["unifiedFullViewingKey"]?.Value<string>() != key)
+                throw new InvalidOperationException("The imported viewing key does not match the store key.");
+            return new WalletAccountCreationResult { AccountIndex = id.Value };
+        }
+
+        public static string StoreAccountLabel(string storeId) => $"store:{storeId}";
+
+        public async Task<bool> IsStoreAccountAsync(string storeId, long accountId, string keyHash)
+        {
+            // The stock API exports a viewing key even for a spend-capable account. An
+            // old numeric ID alone cannot prove that the merchant originally imported a UFVK.
+            if (string.IsNullOrEmpty(keyHash)) return false;
+            var accounts = await ReadWalletKeysAsync(default);
+            var label = StoreAccountLabel(storeId);
+            var owned = accounts.Where(a => a.Label == label || a.Label.StartsWith(label + ":", StringComparison.Ordinal)).ToList();
+            if (owned.Count != 1 || owned[0].Id != accountId) return false;
+            var account = owned[0];
+            var fingerprint = ZcashPaymentMethodConfig.HashViewingKey(account.Key);
+            if (!string.Equals(fingerprint, keyHash, StringComparison.OrdinalIgnoreCase) ||
+                (account.Label != label && account.Label != label + ":" + fingerprint)) return false;
+            var keys = ZcashViewingKey.ReceivingComponents(account.Key, environment.NetworkType);
+            return !accounts.Any(a => a.Id != accountId &&
+                keys.Overlaps(ZcashViewingKey.ReceivingComponents(a.Key, environment.NetworkType, walletExport: true)));
+        }
+
+        private sealed record WalletKey(int Id, string Label, string Key);
+
+        private async Task<List<WalletKey>> ReadWalletKeysAsync(CancellationToken cancellationToken)
+        {
+            var list = await _graphQlClient.SendAsync("query { accounts { id name } }", cancellationToken: cancellationToken);
+            if (list["accounts"] is not JArray accounts) throw new InvalidOperationException("Missing wallet account list.");
+            var result = new List<WalletKey>();
+            // unifiedFullViewingKey is a root query. Batch aliases so each store does
+            // not need a separate network round trip. Only public keys leave the wallet.
+            foreach (var batch in accounts.Chunk(32))
+            {
+                var ids = batch.Select(a => a.Value<int>("id")).ToArray();
+                var fields = string.Join(" ", ids.Select(id => $"k{id}: unifiedFullViewingKey(idAccount: {id})"));
+                var data = await _graphQlClient.SendAsync("query { " + fields + " }", cancellationToken: cancellationToken);
+                foreach (var a in batch)
                 {
-                    name = request.Label,
-                    key = request.Key,
-                    passphrase = request.Passphrase,
-                    aindex = 0,
-                    birth = request.BirthHeight,
-                    useInternal = request.UseInternalAddresses
+                    var id = a.Value<int>("id");
+                    var key = data[$"k{id}"]?.Value<string>() ?? throw new InvalidOperationException("Missing wallet viewing key.");
+                    result.Add(new WalletKey(id, a.Value<string>("name") ?? "", key));
                 }
-            }, cancellationToken);
-
-            var createdId = data["createAccount"]!.Value<long>();
-            // if (createdId == null)
-            // {
-            //     throw new InvalidOperationException($"Unable to create a new account with key {request.Key}");
-            // }
-            var account = await GetAccountAsync(createdId, cancellationToken);
-            var address = await CreateOrGetAddressAsync(createdId, cancellationToken);
-            return new WalletAccountCreationResult
-            {
-                AccountIndex = account.AccountIndex,
-                Address = address?.Address
-            };
+            }
+            return result;
         }
 
         public async Task<WalletAddress> CreateAddressAsync(long accountIndex, string label, CancellationToken cancellationToken = default)
@@ -433,34 +472,6 @@ query {
             }
 
             return account["id"]?.Value<long>() ?? accountIndex;
-        }
-
-        private async Task<WalletAccount> GetAccountAsync(long accountId, CancellationToken cancellationToken)
-        {
-            var data = await _graphQlClient.SendAsync(@"
-query($accountFilter: AccountFilter) {
-  accounts(accountFilter: $accountFilter) {
-    id
-    name
-    height
-    balance
-  }
-}", new { accountFilter = new { id = accountId } }, cancellationToken);
-
-            var account = data["accounts"]?.FirstOrDefault();
-            if (account == null || (account["id"]?.Value<long>() ?? 0) == 0)
-            {
-                return null;
-            }
-
-            return new WalletAccount
-            {
-                AccountIndex = account["id"]!.Value<long>(),
-                Label = account["name"]?.Value<string>(),
-                Height = account["height"]?.Value<long>() ?? 0,
-                Balance = ParseDecimal(account["balance"]),
-                UnlockedBalance = ParseDecimal(account["balance"])
-            };
         }
 
         private async Task<WalletAddress> CreateOrGetAddressAsync(long accountId, CancellationToken cancellationToken)

@@ -1,5 +1,6 @@
 using BTCPayServer.Payments;
 using BTCPayServer.Services.Invoices;
+using Microsoft.Extensions.Logging.Abstractions;
 using Newtonsoft.Json.Linq;
 using Xunit;
 
@@ -119,15 +120,42 @@ public class ZcashCheatModeTests : ZcashIntegrationTestBase
     [Fact]
     public async Task ExistingWalletKeyCannotBeImportedForAnotherStore()
     {
-        await GraphQl.SendAsync("mutation($newAccount: NewAccount!) { createAccount(newAccount: $newAccount) }",
-            new { newAccount = new { name = "store:original", key = "existing-key" } });
-        var backend = Provider.WalletBackends["ZEC"];
-        await Assert.ThrowsAsync<InvalidOperationException>(() => backend.CreateAccountAsync(new Services.WalletAccountCreationRequest
-            { Label = "store:other", Key = "existing-key" }));
-        var recovered = await backend.CreateAccountAsync(new Services.WalletAccountCreationRequest
-            { Label = "store:original", Key = "existing-key" });
-        Assert.Equal(2, recovered.AccountIndex);
+        var backend = Assert.IsType<Services.ZkoolGraphQlBackend>(Provider.WalletBackends["ZEC"]);
+        var first = new Services.WalletAccountCreationRequest { Label = "store:original", Key = MockZkool.MockViewingKeys.First };
+        var account = await backend.CreateAccountAsync(first);
+        Assert.Equal(account.AccountIndex, (await backend.CreateAccountAsync(first)).AccountIndex);
+        foreach (var key in new[] { first.Key, MockZkool.MockViewingKeys.FirstOrchard, MockZkool.MockViewingKeys.FirstTransparent, "", "private input", first.Key[..^1], first.Key.Replace("uviewregtest1", "uview1") })
+            await Assert.ThrowsAsync<InvalidOperationException>(() => backend.CreateAccountAsync(
+                new Services.WalletAccountCreationRequest { Label = "store:other", Key = key }));
+        var hash = Payments.ZcashPaymentMethodConfig.HashViewingKey(first.Key);
+        Assert.True(await backend.IsStoreAccountAsync("original", account.AccountIndex, hash));
+        Assert.False(await backend.IsStoreAccountAsync("original", account.AccountIndex, null));
+        Assert.False(await backend.IsStoreAccountAsync("other", account.AccountIndex, hash));
+        Assert.False(await backend.IsStoreAccountAsync("original", account.AccountIndex, "different"));
         Assert.Equal(2, (await backend.GetAccountsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task LegacyBindingRequiresTheOriginalViewingKeyAndChecksPoolOverlap()
+    {
+        var wallet = Assert.IsType<Services.ZkoolGraphQlBackend>(Provider.WalletBackends["ZEC"]);
+        async Task<int> ExistingAccount(string name, string key)
+        {
+            var result = await GraphQl.SendAsync("mutation($a: NewAccount!) { createAccount(newAccount: $a) }",
+                new { a = new { name, key, aindex = 0, useInternal = false } });
+            return result["createAccount"]!.Value<int>();
+        }
+
+        var key = MockZkool.MockViewingKeys.First;
+        var id = await ExistingAccount("store:legacy", key);
+        var config = new Payments.ZcashPaymentMethodConfig { ViewingKey = key };
+        Assert.True(await wallet.IsStoreAccountAsync("legacy", id, config.GetKeyHash()));
+        Assert.False(await wallet.IsStoreAccountAsync("legacy", id, null));
+        // Stock zkool returns an xpub for a transparent-only wallet account.
+        await ExistingAccount("prior-import", MockZkool.MockViewingKeys.FirstTransparent);
+        Assert.False(await wallet.IsStoreAccountAsync("legacy", id, config.GetKeyHash()));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => wallet.CreateAccountAsync(
+            new Services.WalletAccountCreationRequest { Label = "store:second", Key = key }));
     }
 
     [Fact]
@@ -157,7 +185,7 @@ public class ZcashCheatModeTests : ZcashIntegrationTestBase
         await GraphQl.SendAsync("mutation($idAccount: Int!) { mockSpendNotes(idAccount: $idAccount) }", new { idAccount = id });
         var unspent = await GraphQl.SendAsync("query($idAccount: Int!) { notesByAccount(idAccount: $idAccount) { value } }", new { idAccount = id });
         Assert.Empty(unspent["notesByAccount"]!);
-        var restarted = new Services.ZkoolGraphQlBackend("ZEC", GraphQl, null!, null!);
+        var restarted = new Services.ZkoolGraphQlBackend("ZEC", GraphQl, null!, null!, NullLogger<Services.ZkoolGraphQlBackend>.Instance);
         // Confirmed receipts are reconciled at startup, even with no new block or mempool event.
         Assert.Contains(await restarted.PollEventsAsync(), e => e.Reconcile && string.IsNullOrEmpty(e.BlockHash));
         var receipts = await restarted.GetTransfersAsync(id, addresses.Select(a => a.Index).ToArray());

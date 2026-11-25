@@ -87,16 +87,7 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
 
             await page.GotoAsync($"/stores/{storeId}/Zcashlike/ZEC");
             output.WriteLine(server.UsesRegtest ? "Wallet: local regtest" : "Wallet: mock");
-            var viewingKey = "mock-viewing-key";
-            if (server.UsesRegtest)
-            {
-                using var client = new Services.ZkoolGraphQlClient(new Uri(server.CashcowUrl), new HttpClient());
-                var account = await client.SendAsync("mutation($newAccount: NewAccount!) { createAccount(newAccount: $newAccount) }",
-                    new { newAccount = new { name = $"browser-receiver-{Guid.NewGuid():N}", key = "", aindex = 0, birth = 1, useInternal = false } });
-                var keys = await client.SendAsync("query($accountFilter: AccountFilter) { accounts(accountFilter: $accountFilter) { ufvk } }",
-                    new { accountFilter = new { id = account["createAccount"]!.Value<int>() } });
-                viewingKey = keys["accounts"]![0]!["ufvk"]!.Value<string>()!;
-            }
+            var viewingKey = await NewViewingKeyAsync(server);
             await page.Locator("#WalletPassword").FillAsync(viewingKey);
             await page.Locator("#BirthHeight").FillAsync("1");
             await page.Locator("button[value='add-account']").ClickAsync();
@@ -124,6 +115,20 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
                 await page.Locator("#WalletPassword").FillAsync(viewingKey);
                 await page.Locator("button[value='add-account']").ClickAsync();
                 await Expect(page.GetByText("This viewing key is already assigned to a store. Use a different viewing key.", new() { Exact = true }).First).ToBeVisibleAsync();
+            }
+
+            if (scenario == "subscription-latency")
+            {
+                // The fresh mock wallet starts receiving at (2, 1). Preserve an older
+                // wallet's row with those indices to exercise address-based matching.
+                await using var db = new Npgsql.NpgsqlConnection(server.DatabaseConnectionString);
+                await db.OpenAsync();
+                await using var seed = new Npgsql.NpgsqlCommand("""
+                    INSERT INTO "BTCPayServer.Plugins.ZCash"."Receivers"
+                        ("AccountIndex", "AddressIndex", "UnifiedAddress", "CreatedAt")
+                    VALUES (2, 1, 'retired-wallet-address', now())
+                    """, db);
+                await seed.ExecuteNonQueryAsync();
             }
 
             await page.GotoAsync($"/stores/{storeId}/invoices");
@@ -217,6 +222,91 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
         }
     }
 
+    private static async Task<string> NewViewingKeyAsync(BrowserTestServer server, bool secondOwner = false)
+    {
+        if (!server.UsesRegtest) return secondOwner ? MockZkool.MockViewingKeys.Second : MockZkool.MockViewingKeys.First;
+        using var client = new Services.ZkoolGraphQlClient(new Uri(server.CashcowUrl), new HttpClient());
+        var account = await client.SendAsync("mutation($newAccount: NewAccount!) { createAccount(newAccount: $newAccount) }",
+            new { newAccount = new { name = $"browser-receiver-{Guid.NewGuid():N}", key = "", aindex = 0, birth = 1, useInternal = false } });
+        var key = await client.SendAsync("query($id: Int!) { unifiedFullViewingKey(idAccount: $id) }",
+            new { id = account["createAccount"]!.Value<int>() });
+        return key["unifiedFullViewingKey"]!.Value<string>()!;
+    }
+
+    [LocalBrowserFact]
+    [Trait("Category", "Playwright")]
+    public async Task TwoMerchantOwnersSettleInvoicesInSeparateWallets()
+    {
+        await using var server = await BrowserTestServer.StartAsync();
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new() { Headless = true });
+        async Task<IPage> RegisterAsync()
+        {
+            var context = await browser.NewContextAsync(new() { BaseURL = server.Url });
+            var page = await context.NewPageAsync();
+            await page.GotoAsync("/register");
+            await page.Locator("#Email").FillAsync($"hosted-{Guid.NewGuid():N}@example.com");
+            await page.Locator("#Password").FillAsync("LocalTest123!");
+            await page.Locator("#ConfirmPassword").FillAsync("LocalTest123!");
+            await page.Locator("#RegisterButton").ClickAsync();
+            return page;
+        }
+        // BTCPay reserves the first registration for the host administrator.
+        await (await RegisterAsync()).Context.CloseAsync();
+        async Task<(IPage Page, string Store, string Invoice, string Address)> NewMerchantAsync(bool secondOwner = false)
+        {
+            var page = await RegisterAsync();
+            await page.GotoAsync("/stores/create");
+            await page.Locator("#Name").FillAsync("Hosted merchant");
+            await page.Locator("#Create").ClickAsync();
+            await page.Locator("#menu-item-General").ClickAsync();
+            var store = await page.Locator("#Id").InputValueAsync();
+            await page.Locator($"a[href='/stores/{store}/Zcashlike/ZEC']").First.ClickAsync();
+            await page.Locator("#WalletPassword").FillAsync(await NewViewingKeyAsync(server, secondOwner));
+            await page.Locator("#BirthHeight").FillAsync("1");
+            await page.Locator("button[value='add-account']").ClickAsync();
+            await Expect(page.Locator(".alert-success")).ToContainTextAsync("created for this store");
+            await page.Locator("#Enabled").CheckAsync();
+            await page.Locator("#SettlementConfirmationThresholdChoice").SelectOptionAsync("2");
+            await page.Locator("#SaveButton").ClickAsync();
+            await page.GotoAsync($"/stores/{store}/invoices");
+            await page.Locator("#page-primary").ClickAsync();
+            await page.Locator("#Amount").FillAsync("0.01");
+            await page.Locator("#Currency").FillAsync("ZEC");
+            await page.Locator("#page-primary").ClickAsync();
+            var checkout = await page.Locator("a.invoice-checkout-link").First.GetAttributeAsync("href");
+            var id = checkout!.Split('/').Last();
+            await page.GotoAsync(checkout);
+            var address = await page.Locator("#Address_ZEC-CHAIN [data-clipboard]").GetAttributeAsync("data-clipboard");
+            return (page, store, id, address!);
+        }
+        var first = await NewMerchantAsync();
+        var second = await NewMerchantAsync(secondOwner: true);
+        if (server.UsesRegtest)
+        {
+            // Confirm cashcow change left by a previous run before spending again.
+            await first.Page.Locator("#BlockCount").FillAsync("1");
+            await SubmitCheatFormAsync(first.Page, "form#mine-block button", "/mine-blocks");
+            first.Page.SetDefaultTimeout(120_000);
+            second.Page.SetDefaultTimeout(120_000);
+        }
+        Assert.NotEqual(first.Address, second.Address);
+        var lookup = await second.Page.Context.NewPageAsync();
+        var denied = await lookup.GotoAsync($"/stores/{first.Store}/Zcashlike/ZEC");
+        Assert.True(denied?.Status is 403 or 404 || new Uri(lookup.Url).AbsolutePath is "/errors/403" or "/errors/404",
+            $"Expected a store access denial, received {denied?.Status} at {lookup.Url}");
+        foreach (var merchant in new[] { first, second })
+        {
+            await SubmitCheatFormAsync(merchant.Page, "#FakePayment", "/test-payment");
+            await Expect(merchant.Page.Locator("#CheatSuccessMessage")).ToBeVisibleAsync();
+            await merchant.Page.Locator("#BlockCount").FillAsync("1");
+            await SubmitCheatFormAsync(merchant.Page, "form#mine-block button", "/mine-blocks");
+            await AssertInvoiceStatusAsync(merchant.Page, merchant.Store, merchant.Invoice, "Settled");
+            if (merchant == first)
+                await AssertInvoiceStatusAsync(lookup, second.Store, second.Invoice, "New");
+        }
+    }
+
     private async Task VerifySubscriptionLatencyAsync(BrowserTestServer server, IPage page,
         string storeId, string invoiceId, string address, int idleSeconds = 0)
     {
@@ -232,6 +322,7 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
             account = row.GetInt32(0);
             index = row.GetInt32(1);
         }
+        if (!server.UsesRegtest) Assert.Equal((2, 1), (account, index));
         using var http = new HttpClient { BaseAddress = new Uri(server.CashcowUrl) };
         var deadline = DateTime.UtcNow.AddSeconds(25);
         while (true)
@@ -377,10 +468,12 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
         Assert.Equal(decimal.Parse(amount, System.Globalization.CultureInfo.InvariantCulture),
             await Scalar<decimal>("SELECT \"Amount\" FROM \"Payments\" WHERE \"InvoiceDataId\" = @invoice"));
         // The persistent cursor survives another restart; forced inclusive replay remains idempotent.
+        await server.StopDetectionAsync();
+        using var nextBlock = await http.PostAsync(new Uri(new Uri(server.CashcowUrl), "/rpc"),
+            new StringContent("{\"method\":\"generate\",\"params\":[1]}", System.Text.Encoding.UTF8, "application/json"));
+        nextBlock.EnsureSuccessStatusCode();
         await server.RestartDetectionAsync();
-        await WaitFor(() => Task.FromResult(server.ReadLog().Contains("Account " + account)));
-        await Task.Delay(11000);
-        Assert.Equal(202L, await Scalar<long>(cursorSql));
+        await WaitFor(async () => await Scalar<long>(cursorSql) == 203);
         Assert.Equal(1L, await Scalar<long>("SELECT COUNT(*) FROM \"Payments\" WHERE \"InvoiceDataId\" = @invoice"));
     }
 

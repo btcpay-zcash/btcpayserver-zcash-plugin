@@ -34,7 +34,7 @@ public class ZcashCheckoutCheatModeExtension : ICheckoutCheatModeExtension
         _paymentMethodId = paymentMethodId;
     }
 
-    public bool Handle(PaymentMethodId paymentMethodId) => _paymentMethodId == paymentMethodId;
+    public bool Handle(PaymentMethodId paymentMethodId) => _paymentMethodId == paymentMethodId && _rpcProvider.IsConfigured(_network.CryptoCode);
     
 
     public async Task<ICheckoutCheatModeExtension.PayInvoiceResult> PayInvoice(

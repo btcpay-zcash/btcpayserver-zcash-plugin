@@ -6,7 +6,9 @@ export ASPNETCORE_ENVIRONMENT=Development
 export BTCPAY_NETWORK=regtest
 export BTCPAY_CHAINS=zec
 export BTCPAY_CHEATMODE=true
-export BTCPAY_POSTGRES="${BTCPAY_POSTGRES:-Host=127.0.0.1;Port=15432;Username=btcpay;Database=btcpay_zcash_local}"
+LOCAL_DATABASE=btcpay_zcash_local
+if [ "${BTCPAY_TEST_WALLET:-}" = regtest ]; then LOCAL_DATABASE=btcpay_zcash_regtest; fi
+export BTCPAY_POSTGRES="${BTCPAY_POSTGRES:-Host=127.0.0.1;Port=15432;Username=btcpay;Database=$LOCAL_DATABASE}"
 export BTCPAY_PLUGINDIR="$REPO_ROOT/dev/data/plugins"
 export BTCPAY_DATADIR="$REPO_ROOT/dev/data/btcpay"
 export BTCPAY_BIND=127.0.0.1

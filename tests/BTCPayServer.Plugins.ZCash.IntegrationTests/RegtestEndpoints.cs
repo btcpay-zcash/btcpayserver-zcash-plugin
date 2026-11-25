@@ -18,7 +18,13 @@ internal sealed record RegtestEndpoints(string GraphQl, string CashCow, string R
         HttpResponseMessage response;
         try
         {
-            response = await client.PostAsync(endpoint, new StringContent("{\"query\":\"query { currentHeight }\"}", Encoding.UTF8, "application/json"));
+            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+            {
+                Content = new StringContent("{\"query\":\"query { currentHeight }\"}", Encoding.UTF8, "application/json")
+            };
+            if (Environment.GetEnvironmentVariable("BTCPAY_TEST_GRAPHQL_TOKEN") is { Length: > 0 } token)
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            response = await client.SendAsync(request);
         }
         catch (Exception e) when ((e is HttpRequestException || e is TaskCanceledException) && mode == "auto") { return null; }
         using (response)
