@@ -40,7 +40,7 @@
             <input type="hidden" asp-for="CryptoCode"/>
             @if (Model.BindingUnavailable)
             {
-                <p class="alert alert-warning">The wallet could not verify this store’s receiving account. Contact the host administrator. If you are upgrading from walletd, set up a fresh wallet for new invoices and check the previous wallet for late payments.</p>
+                <p class="alert alert-warning">ZEC checkout is unavailable for this store because its receiving account could not be verified. Ask the host administrator to check the wallet connection and account binding. Keep the previous wallet available for payments to existing invoices.</p>
             }
             else if (Model.AccountIndex is { } account)
             {

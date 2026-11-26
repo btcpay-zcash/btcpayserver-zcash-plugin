@@ -152,10 +152,44 @@ public class ZcashCheatModeTests : ZcashIntegrationTestBase
         Assert.True(await wallet.IsStoreAccountAsync("legacy", id, config.GetKeyHash()));
         Assert.False(await wallet.IsStoreAccountAsync("legacy", id, null));
         // Stock zkool returns an xpub for a transparent-only wallet account.
-        await ExistingAccount("prior-import", MockZkool.MockViewingKeys.FirstTransparent);
+        var transparent = MockZkool.MockViewingKeys.FirstTransparent;
+        var transparentId = await ExistingAccount("store:transparent", transparent);
+        Assert.False(await wallet.IsStoreAccountAsync("transparent", transparentId,
+            Payments.ZcashPaymentMethodConfig.HashViewingKey(transparent)));
         Assert.False(await wallet.IsStoreAccountAsync("legacy", id, config.GetKeyHash()));
         await Assert.ThrowsAsync<InvalidOperationException>(() => wallet.CreateAccountAsync(
             new Services.WalletAccountCreationRequest { Label = "store:second", Key = key }));
+    }
+
+    [Fact]
+    public async Task NonExportableAccountIsIsolatedFromOtherStores()
+    {
+        var wallet = Assert.IsType<Services.ZkoolGraphQlBackend>(Provider.WalletBackends["ZEC"]);
+        async Task<int> AddAccount(string name, string? key)
+        {
+            var result = await GraphQl.SendAsync("mutation($a: NewAccount!) { createAccount(newAccount: $a) }",
+                new { a = new { name, key, aindex = 0 } });
+            return result["createAccount"]!.Value<int>();
+        }
+
+        var legacyId = await AddAccount("store:retired", null);
+        var key = MockZkool.MockViewingKeys.First;
+        var hash = Payments.ZcashPaymentMethodConfig.HashViewingKey(key);
+        Assert.False(await wallet.IsStoreAccountAsync("retired", legacyId, hash));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => wallet.CreateAccountAsync(
+            new Services.WalletAccountCreationRequest { Label = "store:retired", Key = key }));
+
+        var older = await AddAccount("store:older", MockZkool.MockViewingKeys.Second);
+        Assert.True(await wallet.IsStoreAccountAsync("older", older,
+            Payments.ZcashPaymentMethodConfig.HashViewingKey(MockZkool.MockViewingKeys.Second)));
+        var request = new Services.WalletAccountCreationRequest { Label = "store:active", Key = key };
+        var active = await wallet.CreateAccountAsync(request);
+        Assert.True(await wallet.IsStoreAccountAsync("active", active.AccountIndex, hash));
+        Assert.Equal(active.AccountIndex, (await wallet.CreateAccountAsync(request)).AccountIndex);
+
+        // The non-exportable account shares a batch with a real overlapping key.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => wallet.CreateAccountAsync(
+            new Services.WalletAccountCreationRequest { Label = "store:duplicate", Key = MockZkool.MockViewingKeys.FirstOrchard }));
     }
 
     [Fact]

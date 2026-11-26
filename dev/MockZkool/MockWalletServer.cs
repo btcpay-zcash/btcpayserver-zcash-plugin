@@ -152,11 +152,19 @@ internal sealed class MockWallet
             var v = request["variables"] ?? new JsonObject();
             JsonObject Result(string key, JsonNode? value) => new() { [key] = value };
             var id = v["idAccount"]?.GetValue<int>() ?? v["id"]?.GetValue<int>() ?? 1;
+            if (q.Contains("mockDisconnectTip"))
+            {
+                // Drop an empty tip block. The payment remains in the preceding block.
+                if (transactions.Any(t => t.Tx["height"]!.GetValue<long>() == height))
+                    throw new ArgumentException("The mock tip contains payments");
+                return Result("mockDisconnectTip", JsonValue.Create(--height));
+            }
             if (q.Contains("currentHeight")) return Result("currentHeight", JsonValue.Create(height));
             if (q.Contains("synchronize")) return Result("synchronize", JsonValue.Create(height));
             if (q.Contains("unifiedFullViewingKey"))
             {
-                JsonNode? PublicKey(int account) => accounts.Single(a => a["id"]!.GetValue<int>() == account)["ufvk"]?.DeepClone();
+                JsonNode PublicKey(int account) => accounts.Single(a => a["id"]!.GetValue<int>() == account)["ufvk"]?.DeepClone()
+                    ?? throw new ArgumentException("Viewing key has no receivers");
                 if (v["id"] != null) return Result("unifiedFullViewingKey", PublicKey(id));
                 var keys = new JsonObject();
                 foreach (System.Text.RegularExpressions.Match alias in System.Text.RegularExpressions.Regex.Matches(q,

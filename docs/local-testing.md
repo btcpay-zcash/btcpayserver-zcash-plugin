@@ -187,8 +187,10 @@ receipts and confirmation updates. History queries retain receipts already spent
 by the merchant. This uses zkool's existing `synchronize` and
 `transactionsByAccount(height:)` operations; no zkool GraphQL schema change is
 required. It recovers after wallet downtime but is not an independent fallback
-while that wallet is unavailable. The replay overlap does not implement full
-rollback of payments removed by a chain reorganization.
+while that wallet is unavailable. For receipts still reported by zkool, the listener recalculates the payment
+status from the latest confirmation count and the invoice threshold. A receipt
+can return to Processing. A missing receipt alone does not establish that a
+payment was invalidated.
 
 The mock-backed `offline-expired` browser case stops BTCPay detection, pays and
 mines while it is stopped, restarts with the wallet unavailable until the invoice

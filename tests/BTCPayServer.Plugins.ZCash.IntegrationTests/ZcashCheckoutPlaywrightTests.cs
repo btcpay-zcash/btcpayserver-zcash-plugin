@@ -209,6 +209,18 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
             await SubmitCheatFormAsync(page, "form#mine-block button", "/mine-blocks");
             await AssertInvoiceStatusAsync(merchant, storeId, invoiceId, scenario == "overpaid" ? "Settled (paid over)" : "Settled");
             await Expect(page.Locator("xpath=//*[text()=\"Invoice Paid\" or text()=\"Payment Received\"]")).ToBeVisibleAsync(new() { Timeout = 60_000 });
+            if (scenario == "exact" && !server.UsesRegtest)
+            {
+                using var wallet = new Services.ZkoolGraphQlClient(new Uri(server.CashcowUrl), new HttpClient());
+                await wallet.SendAsync("mutation { mockDisconnectTip }");
+                await AssertConfirmationsAsync(merchant, invoiceId, "1 / 2");
+                await using var db = new Npgsql.NpgsqlConnection(server.DatabaseConnectionString);
+                await db.OpenAsync();
+                await using var status = new Npgsql.NpgsqlCommand(
+                    """SELECT "Status" FROM "Payments" WHERE "InvoiceDataId" = @invoice""", db);
+                status.Parameters.AddWithValue("invoice", invoiceId);
+                Assert.Equal("Processing", await status.ExecuteScalarAsync());
+            }
             await context.Tracing.StopAsync();
         }
         catch
@@ -238,6 +250,14 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
     public async Task TwoMerchantOwnersSettleInvoicesInSeparateWallets()
     {
         await using var server = await BrowserTestServer.StartAsync();
+        if (!server.UsesRegtest)
+        {
+            // This legacy account has no exportable full viewing key. Both stores
+            // must still be able to import keys, issue invoices and receive payments.
+            using var wallet = new Services.ZkoolGraphQlClient(new Uri(server.CashcowUrl), new HttpClient());
+            await wallet.SendAsync("mutation($a: NewAccount!) { createAccount(newAccount: $a) }",
+                new { a = new { name = "store:retired", aindex = 0 } });
+        }
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new() { Headless = true });
         async Task<IPage> RegisterAsync()

@@ -388,12 +388,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             var alreadyExistingPaymentThatMatches = allPayments
                 .FirstOrDefault(c => c.Id == paymentId && c.PaymentMethodId == pmi);
 
-            // Now compute status, taking into account any existing Settled state
-            var isSettled = GetStatus(details, invoice.SpeedPolicy);
-            var newStatus = isSettled ? PaymentStatus.Settled : PaymentStatus.Processing;
-            var status = alreadyExistingPaymentThatMatches?.Status == PaymentStatus.Settled
-                ? PaymentStatus.Settled
-                : newStatus;
+            var status = GetStatus(details, invoice.SpeedPolicy) ? PaymentStatus.Settled : PaymentStatus.Processing;
 
             var paymentData = new PaymentData()
             {

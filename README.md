@@ -26,13 +26,8 @@ dotnet test tests/BTCPayServer.Plugins.ZCash.IntegrationTests/BTCPayServer.Plugi
 
 ## Full Node
 
-Running a full node (with `zebra` and `lightwalletd`)
-
-```sh
-export BTCPAYGEN_EXCLUDE_FRAGMENTS="$BTCPAYGEN_EXCLUDE_FRAGMENTS;zcash"
-export BTCPAYGEN_ADDITIONAL_FRAGMENTS="$BTCPAYGEN_ADDITIONAL_FRAGMENTS;zcash-fullnode"
-. ./btcpay-setup.sh -i
-```
+Use the [Docker wallet fragment and local lightwalletd options](docs/installation.md#optional-local-zebra-and-lightwalletd)
+to connect zkool to your own full node.
 
 You can create a local test build of the plugin manually using these steps:
 
@@ -103,7 +98,9 @@ Test the upgrade on a restored copy before switching a host that receives ZEC.
 
 - **Existing zkool stores.** Keep the same wallet database. The plugin verifies
   the stored wallet ID, store label, and original viewing key or fingerprint.
-  Existing verified imports retain their receiver addresses. Stock zkool can
+  Existing verified imports retain their receiver addresses. A legacy single-address
+  account without an exportable full viewing key stays in the wallet for historical
+  payments. It cannot be bound to a store and does not block other stores. Stock zkool can
   export a viewing key from a spending account too. An old assignment with
   only a numeric ID and label cannot establish watch-only provenance. Those
   settings stay intact and ZEC checkout stays unavailable for that store.

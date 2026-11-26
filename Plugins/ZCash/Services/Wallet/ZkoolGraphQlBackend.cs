@@ -122,15 +122,13 @@ query {
             var label = request.Label + ":" + ZcashPaymentMethodConfig.HashViewingKey(key);
             // The controller holds the database-wide import lock through the store update.
             // The fingerprinted label also makes retries after an uncertain RPC response safe.
-            var accounts = await ReadWalletKeysAsync(cancellationToken);
-            var existing = accounts.SingleOrDefault(a => a.Label == label);
-            foreach (var account in accounts)
-            {
-                if (account == existing && account.Key == key) continue;
-                if (account.Label == request.Label || account.Label.StartsWith(request.Label + ":", StringComparison.Ordinal) ||
-                    components.Overlaps(ZcashViewingKey.ReceivingComponents(account.Key, environment.NetworkType, walletExport: true)))
-                    throw new InvalidOperationException("This store or viewing key is already assigned to a wallet account.");
-            }
+            var accounts = await ListAccountLabelsAsync(cancellationToken);
+            var owned = accounts.Where(a => a.BelongsTo(request.Label)).ToArray();
+            var existing = owned.SingleOrDefault();
+            if (existing != null && (existing.Label != label || await ReadViewingKeyAsync(existing.Id, cancellationToken) != key))
+                throw new InvalidOperationException("This store already has a different receiving account.");
+            if (await HasOverlappingKeyAsync(accounts.Except(owned), components, cancellationToken))
+                throw new InvalidOperationException("This viewing key is already assigned to a wallet account.");
 
             if (existing != null)
                 return new WalletAccountCreationResult { AccountIndex = existing.Id };
@@ -140,9 +138,7 @@ query {
                 new { a = new { name = label, key, aindex = 0, birth = request.BirthHeight, useInternal = false } }, cancellationToken);
             var id = data["createAccount"]?.Value<int>();
             if (id is not > 0) throw new InvalidOperationException("The wallet did not return a receiving account.");
-            var exported = await _graphQlClient.SendAsync(
-                "query($id: Int!) { unifiedFullViewingKey(idAccount: $id) }", new { id }, cancellationToken);
-            if (exported["unifiedFullViewingKey"]?.Value<string>() != key)
+            if (await ReadViewingKeyAsync(id.Value, cancellationToken) != key)
                 throw new InvalidOperationException("The imported viewing key does not match the store key.");
             return new WalletAccountCreationResult { AccountIndex = id.Value };
         }
@@ -154,41 +150,85 @@ query {
             // The stock API exports a viewing key even for a spend-capable account. An
             // old numeric ID alone cannot prove that the merchant originally imported a UFVK.
             if (string.IsNullOrEmpty(keyHash)) return false;
-            var accounts = await ReadWalletKeysAsync(default);
             var label = StoreAccountLabel(storeId);
-            var owned = accounts.Where(a => a.Label == label || a.Label.StartsWith(label + ":", StringComparison.Ordinal)).ToList();
-            if (owned.Count != 1 || owned[0].Id != accountId) return false;
+            var accounts = await ListAccountLabelsAsync(default);
+            var owned = accounts.Where(a => a.BelongsTo(label)).ToArray();
+            if (owned.Length != 1 || owned[0].Id != accountId) return false;
             var account = owned[0];
-            var fingerprint = ZcashPaymentMethodConfig.HashViewingKey(account.Key);
-            if (!string.Equals(fingerprint, keyHash, StringComparison.OrdinalIgnoreCase) ||
-                (account.Label != label && account.Label != label + ":" + fingerprint)) return false;
-            var keys = ZcashViewingKey.ReceivingComponents(account.Key, environment.NetworkType);
-            return !accounts.Any(a => a.Id != accountId &&
-                keys.Overlaps(ZcashViewingKey.ReceivingComponents(a.Key, environment.NetworkType, walletExport: true)));
+            var key = await ReadViewingKeyAsync(account.Id, default);
+            if (key == null) return false;
+            var fingerprint = ZcashPaymentMethodConfig.HashViewingKey(key);
+            if (!string.Equals(fingerprint, keyHash, StringComparison.OrdinalIgnoreCase)) return false;
+
+            HashSet<string> components;
+            try
+            {
+                components = ZcashViewingKey.ReceivingComponents(key, environment.NetworkType);
+            }
+            catch (FormatException)
+            {
+                // Legacy imports could contain a key other than a unified full viewing key.
+                return false;
+            }
+            // Fingerprinted accounts passed the overlap check under the import lock.
+            if (account.Label == label + ":" + fingerprint) return true;
+            // Older store labels predate that check. Verify their other exportable keys.
+            return account.Label == label && !await HasOverlappingKeyAsync(accounts.Except(owned), components, default);
         }
 
-        private sealed record WalletKey(int Id, string Label, string Key);
+        private sealed record AccountLabel(int Id, string Label)
+        {
+            public bool BelongsTo(string storeLabel) => Label == storeLabel || Label.StartsWith(storeLabel + ":", StringComparison.Ordinal);
+        }
 
-        private async Task<List<WalletKey>> ReadWalletKeysAsync(CancellationToken cancellationToken)
+        private async Task<AccountLabel[]> ListAccountLabelsAsync(CancellationToken cancellationToken)
         {
             var list = await _graphQlClient.SendAsync("query { accounts { id name } }", cancellationToken: cancellationToken);
             if (list["accounts"] is not JArray accounts) throw new InvalidOperationException("Missing wallet account list.");
-            var result = new List<WalletKey>();
-            // unifiedFullViewingKey is a root query. Batch aliases so each store does
-            // not need a separate network round trip. Only public keys leave the wallet.
+            return accounts.Select(a => new AccountLabel(a.Value<int>("id"), a.Value<string>("name") ?? "")).ToArray();
+        }
+
+        private async Task<string> ReadViewingKeyAsync(int id, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var data = await _graphQlClient.SendAsync(
+                    "query($id: Int!) { unifiedFullViewingKey(idAccount: $id) }", new { id }, cancellationToken);
+                return data["unifiedFullViewingKey"]?.Value<string>() ?? throw new InvalidOperationException("Missing wallet viewing key.");
+            }
+            catch (ZkoolGraphQlClient.GraphQlApiException ex) when (ex.Message == "Viewing key has no receivers")
+            {
+                // A legacy single-address account has no full viewing key to bind to a store.
+                return null;
+            }
+        }
+
+        private async Task<bool> HasOverlappingKeyAsync(IEnumerable<AccountLabel> accounts, HashSet<string> components,
+            CancellationToken cancellationToken)
+        {
             foreach (var batch in accounts.Chunk(32))
             {
-                var ids = batch.Select(a => a.Value<int>("id")).ToArray();
-                var fields = string.Join(" ", ids.Select(id => $"k{id}: unifiedFullViewingKey(idAccount: {id})"));
-                var data = await _graphQlClient.SendAsync("query { " + fields + " }", cancellationToken: cancellationToken);
-                foreach (var a in batch)
+                var fields = string.Join(" ", batch.Select(a => $"k{a.Id}: unifiedFullViewingKey(idAccount: {a.Id})"));
+                JObject data = null;
+                try
                 {
-                    var id = a.Value<int>("id");
-                    var key = data[$"k{id}"]?.Value<string>() ?? throw new InvalidOperationException("Missing wallet viewing key.");
-                    result.Add(new WalletKey(id, a.Value<string>("name") ?? "", key));
+                    data = await _graphQlClient.SendAsync("query { " + fields + " }", cancellationToken: cancellationToken);
+                }
+                catch (ZkoolGraphQlClient.GraphQlApiException)
+                {
+                    // One non-exportable key can fail the whole batch. Individual reads
+                    // below distinguish that case from authentication or other wallet errors.
+                }
+                foreach (var account in batch)
+                {
+                    var key = data == null
+                        ? await ReadViewingKeyAsync(account.Id, cancellationToken)
+                        : data[$"k{account.Id}"]?.Value<string>() ?? throw new InvalidOperationException("Missing wallet viewing key.");
+                    if (key != null && components.Overlaps(ZcashViewingKey.ReceivingComponents(key, environment.NetworkType, walletExport: true)))
+                        return true;
                 }
             }
-            return result;
+            return false;
         }
 
         public async Task<WalletAddress> CreateAddressAsync(long accountIndex, string label, CancellationToken cancellationToken = default)
