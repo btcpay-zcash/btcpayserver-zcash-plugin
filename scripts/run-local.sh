@@ -4,9 +4,10 @@ if [ "${BTCPAY_TEST_WALLET:-auto}" != mock ] && curl --max-time 3 -fsS -H 'Conte
   export BTCPAY_ZEC_WALLET_GRAPHQL_URI=http://127.0.0.1:18081/graphql
   export BTCPAY_ZEC_WALLET_CASHCOW_URI=http://127.0.0.1:18082/graphql
   export BTCPAY_ZEC_CASHCOW_DAEMON_URI=http://127.0.0.1:18232
+  export BTCPAY_TEST_WALLET=regtest
   export BTCPAY_ZEC_CASHCOW_MINER_SEED="burger voice warrior danger satoshi you solid atom elite alcohol category layer able debate culture talk tissue language hip surge fiction paddle stove voyage"
 elif [ "${BTCPAY_TEST_WALLET:-auto}" = regtest ]; then
-  echo "Start zcash-regtest/scripts/run-local.py first" >&2
+  echo "Run zcash-regtest/scripts/regtest.sh start first" >&2
   exit 1
 fi
 source "$(dirname "$0")/local-env.sh"
@@ -18,7 +19,7 @@ for LOCAL_PORT in 14142 18080; do
     exit 1
   fi
 done
-./scripts/local-postgres.sh start
+./scripts/local-postgres.sh start "$LOCAL_DATABASE"
 dotnet build -m:1 Plugins/ZCash/BTCPayServer.Plugins.ZCash.csproj
 MOCK_PID=""
 SERVER_PID=""

@@ -25,20 +25,29 @@
             <div class="card">
                 <ul class="list-group list-group-flush">
                     <li class="list-group-item">Node available: @Model.Summary.DaemonAvailable</li>
-                    <li class="list-group-item">Wallet available: @Model.Summary.WalletAvailable (@(Model.WalletFileFound ? "Wallet file present" : "Wallet file not found"))</li>
+                    <li class="list-group-item">Wallet available: @Model.Summary.WalletAvailable</li>
                     <li class="list-group-item">Last updated: @Model.Summary.UpdatedAt</li>
                     <li class="list-group-item">Synced: @Model.Summary.Synced (@Model.Summary.CurrentHeight / @Model.Summary.TargetHeight)</li>
                 </ul>
             </div>
         }
 
-        @if (!Model.WalletFileFound || Model.Summary?.WalletHeight == default)
-        {
-            <form method="post" asp-action="GetStoreZcashLikePaymentMethod" 
-                  asp-route-storeId="@Context.GetRouteValue("storeId")"
-                  asp-route-cryptoCode="@Context.GetRouteValue("cryptoCode")"
-                  class="mt-4" enctype="multipart/form-data">
+        <form method="post" asp-action="GetStoreZcashLikePaymentMethod"
+              asp-route-storeId="@Context.GetRouteValue("storeId")"
+              asp-route-cryptoCode="@Context.GetRouteValue("cryptoCode")"
+              class="mt-4">
 
+            <input type="hidden" asp-for="CryptoCode"/>
+            @if (Model.BindingUnavailable)
+            {
+                <p class="alert alert-warning">ZEC checkout is unavailable for this store because its receiving account could not be verified. Ask the host administrator to check the wallet connection and account binding. Keep the previous wallet available for payments to existing invoices.</p>
+            }
+            else if (Model.AccountIndex is { } account)
+            {
+                <p>Receiving account #@account</p>
+            }
+            else
+            {
                 <div class="card my-2">
                     <h3 class="card-title p-2" text-translate="true">Create Wallet</h3>
                     <div class="form-group p-2">
@@ -48,63 +57,11 @@
                     </div>
                     <div class="form-group p-2">
                         <label asp-for="WalletPassword" class="form-label"></label>
-                        <input class="form-control" asp-for="WalletPassword">
+                        <input class="form-control" type="password" asp-for="WalletPassword" autocomplete="off" spellcheck="false">
                         <span asp-validation-for="WalletPassword" class="text-danger"></span>
                     </div>
                     <div class="card-footer text-right">
-                        <button name="command" value="upload-wallet" class="btn btn-secondary" type="submit" text-translate="true">Create</button>
-                    </div>
-                </div>
-            </form>
-        }
-        <form method="post" asp-action="GetStoreZcashLikePaymentMethod"
-              asp-route-storeId="@Context.GetRouteValue("storeId")"
-              asp-route-cryptoCode="@Context.GetRouteValue("cryptoCode")"
-              class="mt-4" enctype="multipart/form-data">
-
-            <input type="hidden" asp-for="CryptoCode"/>
-            @if (!Model.WalletFileFound || Model.Summary == null || Model.Summary.WalletHeight == default)
-            {
-                <input type="hidden" asp-for="AccountIndex"/>
-            }
-            else
-            {
-                <div class="form-group">
-                    <label asp-for="AccountIndex" class="control-label"></label>
-                    @* @if (@Model.Accounts != null && Model.Accounts.Any()) *@
-                    @* { *@
-                    @*     <select asp-for="AccountIndex" asp-items="Model.Accounts" class="form-control"></select> *@
-                    @*     <span asp-validation-for="AccountIndex" class="text-danger"></span> *@
-                    @* } *@
-                    @* else *@
-                    @* { *@
-                        @if (@Model.AccountIndex == null)
-                        {
-                            <span text-translate="true">No accounts available on the current wallet</span>
-                        }
-                        else {
-                            <span text-translate="false">@Model.AccountIndex</span>
-                        }
-                        <input type="hidden" asp-for="AccountIndex"/>
-                    @* } *@
-                </div>
-                <div class="form-group">
-                    <div class="card my-2">
-                        <h3 class="card-title p-2" text-translate="true">Create Wallet</h3>
-                        <div class="form-group p-2">
-                            <label asp-for="BirthHeight" class="form-label"></label>
-                            <input class="form-control" asp-for="BirthHeight">
-                            <span asp-validation-for="BirthHeight" class="text-danger"></span>
-                        </div>
-                        <div class="form-group p-2">
-                            <label asp-for="WalletPassword" class="form-label"></label>
-                            <input class="form-control" asp-for="WalletPassword">
-                            <span asp-validation-for="WalletPassword" class="text-danger"></span>
-                        </div>
-                        <div class="card-footer text-right">
-                            <button name="command" value="add-account" class="input-group-text btn btn-secondary" type="submit" text-translate="true">Add account</button>
-                            @* <button name="command" value="upload-wallet" class="btn btn-secondary" type="submit" text-translate="true">Create</button> *@
-                        </div>
+                        <button name="command" value="add-account" class="input-group-text btn btn-secondary" type="submit" text-translate="true">Add account</button>
                     </div>
                 </div>
             }

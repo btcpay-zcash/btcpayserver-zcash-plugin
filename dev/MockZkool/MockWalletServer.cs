@@ -128,7 +128,7 @@ internal sealed class MockWallet
     private int nextAccount = 2;
     private int nextAddress = 0;
     private readonly string sessionId = Guid.NewGuid().ToString("N");
-    private readonly List<JsonObject> accounts = [new() { ["id"] = 1, ["name"] = "cashcow", ["aindex"] = 0, ["height"] = 200, ["balance"] = 1000m }];
+    private readonly List<JsonObject> accounts = [new() { ["id"] = 1, ["name"] = "cashcow", ["ufvk"] = MockViewingKeys.Cashcow, ["aindex"] = 0, ["height"] = 200, ["balance"] = 1000m }];
     private readonly Dictionary<string, (int Account, int Index)> addresses = new();
     private readonly List<(int Account, JsonObject Tx)> transactions = new();
 
@@ -152,12 +152,31 @@ internal sealed class MockWallet
             var v = request["variables"] ?? new JsonObject();
             JsonObject Result(string key, JsonNode? value) => new() { [key] = value };
             var id = v["idAccount"]?.GetValue<int>() ?? v["id"]?.GetValue<int>() ?? 1;
+            if (q.Contains("mockDisconnectTip"))
+            {
+                // Drop an empty tip block. The payment remains in the preceding block.
+                if (transactions.Any(t => t.Tx["height"]!.GetValue<long>() == height))
+                    throw new ArgumentException("The mock tip contains payments");
+                return Result("mockDisconnectTip", JsonValue.Create(--height));
+            }
             if (q.Contains("currentHeight")) return Result("currentHeight", JsonValue.Create(height));
             if (q.Contains("synchronize")) return Result("synchronize", JsonValue.Create(height));
+            if (q.Contains("unifiedFullViewingKey"))
+            {
+                JsonNode PublicKey(int account) => accounts.Single(a => a["id"]!.GetValue<int>() == account)["ufvk"]?.DeepClone()
+                    ?? throw new ArgumentException("Viewing key has no receivers");
+                if (v["id"] != null) return Result("unifiedFullViewingKey", PublicKey(id));
+                var keys = new JsonObject();
+                foreach (System.Text.RegularExpressions.Match alias in System.Text.RegularExpressions.Regex.Matches(q,
+                    @"(k\d+): unifiedFullViewingKey\(idAccount: (\d+)\)"))
+                    keys[alias.Groups[1].Value] = PublicKey(int.Parse(alias.Groups[2].Value));
+                return keys;
+            }
             if (q.Contains("createAccount"))
             {
                 var account = nextAccount++;
-                accounts.Add(new() { ["id"] = account, ["name"] = v["newAccount"]?["name"]?.DeepClone(), ["ufvk"] = v["newAccount"]?["key"]?.DeepClone(), ["aindex"] = account - 1, ["height"] = height, ["balance"] = 0m });
+                var input = v["a"] ?? v["newAccount"];
+                accounts.Add(new() { ["id"] = account, ["name"] = input?["name"]?.DeepClone(), ["ufvk"] = input?["key"]?.DeepClone(), ["aindex"] = account - 1, ["height"] = height, ["balance"] = 0m });
                 return Result("createAccount", JsonValue.Create(account));
             }
             if (q.Contains("newAddresses"))

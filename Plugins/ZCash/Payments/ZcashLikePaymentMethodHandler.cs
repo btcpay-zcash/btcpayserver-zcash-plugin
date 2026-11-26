@@ -38,43 +38,55 @@ namespace BTCPayServer.Plugins.ZCash.Payments
             Serializer = BlobSerializer.CreateSerializer().Serializer;
             _ZcashRpcProvider = ZcashRpcProvider;
         }
-        bool IsReady() => _ZcashRpcProvider.IsConfigured(_network.CryptoCode) && _ZcashRpcProvider.IsAvailable(_network.CryptoCode);
-
         public Task BeforeFetchingRates(PaymentMethodContext context)
         {
             context.Prompt.Currency = _network.CryptoCode;
             context.Prompt.Divisibility = _network.Divisibility;
-            var config = ParsePaymentMethodConfig(context.PaymentMethodConfig);
-            if (context.Prompt.Activated && IsReady() && config.AccountIndex is { } accountIndex)
-            {
-                var walletBackend = _ZcashRpcProvider.WalletBackends[_network.CryptoCode];
-                // var walletClient = _ZcashRpcProvider.WalletRpcClients[_network.CryptoCode];
-                // var daemonClient = _ZcashRpcProvider.DaemonRpcClients[_network.CryptoCode];
-                
-                try
-                {
-                    context.State = new Prepare()
-                    {
-                        GetFeeRate = walletBackend.GetFeeEstimateAsync(accountIndex),
-                        ReserveAddress = s => walletBackend.CreateAddressAsync(accountIndex, $"btcpay invoice #{s}"),
-                        AccountIndex = accountIndex
-                    };
-                }
-                catch (Exception ex)
-                {
-                    context.Logs.Write($"Error in BeforeFetchingRates: {ex.Message}", InvoiceEventData.EventSeverity.Error);
-                }
-            }
             return Task.CompletedTask;
         }
+
+        public Task ValidatePaymentMethodConfig(PaymentMethodConfigValidationContext context)
+        {
+            // Account assignment is established by wallet import. Generic API writes may
+            // update the settlement threshold but cannot create or replace the binding.
+            var previous = context.PreviousConfig as JObject ?? new JObject();
+            var updated = (JObject)previous.DeepClone();
+            if (context.Config is not JObject requested)
+            {
+                context.ModelState.AddModelError("config", "Expected a Zcash settings object.");
+                return Task.CompletedTask;
+            }
+            foreach (var field in requested.Properties())
+            {
+                if (string.Equals(field.Name, nameof(ZcashPaymentMethodConfig.InvoiceSettledConfirmationThreshold), StringComparison.OrdinalIgnoreCase))
+                {
+                    if (field.Value.Type != JTokenType.Null &&
+                        (field.Value.Type != JTokenType.Integer || !int.TryParse(field.Value.ToString(), out var value) || value < 0 || value > 100))
+                        context.ModelState.AddModelError("config", "Required confirmations must be between 0 and 100.");
+                    else
+                    {
+                        var old = updated.Property(field.Name, StringComparison.OrdinalIgnoreCase);
+                        updated[old?.Name ?? field.Name] = field.Value.DeepClone();
+                    }
+                }
+                else if (!JToken.DeepEquals(previous.GetValue(field.Name, StringComparison.OrdinalIgnoreCase), field.Value))
+                    context.ModelState.AddModelError("config", "Configure the receiving account through the store wallet settings.");
+            }
+            context.Config = updated;
+            return Task.CompletedTask;
+        }
+
         public async Task ConfigurePrompt(PaymentMethodContext context)
         {
             if (!_ZcashRpcProvider.IsAvailable(_network.CryptoCode))
                 throw new PaymentMethodUnavailableException($"Node or wallet not available");
-            var invoice = context.InvoiceEntity;
-            var ZcashPrepare = (Prepare)context.State;
-            var feeRatePerKb = await ZcashPrepare.GetFeeRate;
-            var address = await ZcashPrepare.ReserveAddress(invoice.Id);
+            var config = ParsePaymentMethodConfig(context.PaymentMethodConfig);
+            if (config.AccountIndex is not { } accountId ||
+                _ZcashRpcProvider.WalletBackends[_network.CryptoCode] is not ZkoolGraphQlBackend backend ||
+                !await backend.IsStoreAccountAsync(context.Store.Id, accountId, config.GetKeyHash()))
+                throw new PaymentMethodUnavailableException("This store has no verified Zcash receiving account.");
+            var feeRatePerKb = await backend.GetFeeEstimateAsync(accountId);
+            var address = await backend.CreateAddressAsync(accountId, $"btcpay invoice #{context.InvoiceEntity.Id}");
 
             var feeRatePerByte = feeRatePerKb.FeePerKb / 1024;
 
@@ -82,10 +94,10 @@ namespace BTCPayServer.Plugins.ZCash.Payments
             context.Prompt.PaymentMethodFee = ZcashMoney.Convert(feeRatePerByte * 100);
             context.Prompt.Details = JObject.FromObject(new ZcashPaymentPromptDetails()
             {
-                AccountIndex = ZcashPrepare.AccountIndex,
+                AccountIndex = accountId,
                 AddressIndex = address.AddressIndex,
                 DepositAddress = address.Address,
-                InvoiceSettledConfirmationThreshold = ParsePaymentMethodConfig(context.PaymentMethodConfig).InvoiceSettledConfirmationThreshold
+                InvoiceSettledConfirmationThreshold = config.InvoiceSettledConfirmationThreshold
             }, Serializer);
             context.TrackedDestinations.Add(address.Address);
         }
@@ -105,15 +117,6 @@ namespace BTCPayServer.Plugins.ZCash.Payments
         public ZcashPaymentMethodConfig ParsePaymentMethodConfig(JToken config)
         {
             return config.ToObject<ZcashPaymentMethodConfig>(Serializer) ?? throw new FormatException($"Invalid {nameof(ZcashPaymentMethodConfig)}");
-        }
-
-
-
-        class Prepare
-        {
-            public Task<WalletFeeEstimate> GetFeeRate;
-            public Func<string, Task<WalletAddress>> ReserveAddress;
-            public long AccountIndex { get; internal set; }
         }
 
         public ZcashLikePaymentData ParsePaymentDetails(JToken details)

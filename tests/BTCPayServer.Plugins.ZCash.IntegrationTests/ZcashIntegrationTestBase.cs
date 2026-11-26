@@ -45,7 +45,7 @@ public abstract class ZcashIntegrationTestBase : IAsyncLifetime
         var environment = new BTCPayServerEnvironment(app.Environment,
             new BTCPayNetworkProvider([], new NBXplorer.NBXplorerNetworkProvider(ChainName.Regtest), new BTCPayServer.Logging.Logs()), null!, new BTCPayServerOptions { CheatMode = true });
         Provider = new ZcashRPCProvider(configuration, new EventAggregator(new BTCPayServer.Logging.Logs()),
-            services.GetRequiredService<IHttpClientFactory>(), null!, environment, NullLogger<ZcashRPCProvider>.Instance);
+            services.GetRequiredService<IHttpClientFactory>(), null!, environment, NullLoggerFactory.Instance);
         GraphQl = Provider.CashCowWalletGraphQlClients["ZEC"];
         CheatMode = new ZcashCheckoutCheatModeExtension(Provider,
             new ZcashLikeSpecificBtcPayNetwork { CryptoCode = "ZEC" }, PaymentMethodId);

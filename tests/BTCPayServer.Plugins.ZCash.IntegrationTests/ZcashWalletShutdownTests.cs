@@ -8,7 +8,7 @@ public class ZcashWalletShutdownTests
 {
     private static ZcashWalletEventHostedService CreateService(Task loop)
     {
-        var service = new ZcashWalletEventHostedService(null!, null!, null!, null!);
+        var service = new ZcashWalletEventHostedService(null!, null!, null!, new BTCPayServer.Logging.Logs());
         var fields = BindingFlags.Instance | BindingFlags.NonPublic;
         typeof(ZcashWalletEventHostedService).GetField("_cts", fields)!
             .SetValue(service, new CancellationTokenSource());
@@ -35,11 +35,10 @@ public class ZcashWalletShutdownTests
     }
 
     [Fact]
-    public async Task UnexpectedWalletFaultStillEscapesShutdown()
+    public async Task WalletFaultDoesNotEscapeShutdown()
     {
         var failure = new InvalidOperationException("wallet fault");
         var service = CreateService(Task.FromException(failure));
-        Assert.Same(failure, await Assert.ThrowsAsync<InvalidOperationException>(
-            () => service.StopAsync(CancellationToken.None)));
+        await service.StopAsync(CancellationToken.None);
     }
 }

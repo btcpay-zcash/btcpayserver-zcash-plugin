@@ -17,10 +17,11 @@ namespace BTCPayServer.Plugins.ZCash.Configuration
         public Uri CashcowDaemonRpcUri { get; set; }
         public string CashcowMinerSeed { get; set; }
         public Uri InternalWalletRpcUri { get; set; }
+        public string GraphQlToken { get; set; }
         public Uri GraphQlEndpointUri { get; set; }
         public Uri CashCowEndpointUri { get; set; }
         public string WalletDirectory { get; set; }
-        public WalletBackend WalletBackend { get; set; } = WalletBackend.Walletd;
+        public WalletBackend WalletBackend { get; set; } = WalletBackend.ZkoolGraphQL;
         public string ConfigFile { get; set; }
     }
 }

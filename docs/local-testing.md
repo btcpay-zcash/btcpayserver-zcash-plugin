@@ -115,6 +115,10 @@ uses synthetic Zcash data; it does not replace real regtest chain coverage.
 
 ## Real local regtest (no Docker)
 
+The real-wallet launcher defaults to the `btcpay_zcash_regtest` database in
+the same local PostgreSQL cluster. Mock stores and invoice history use
+`btcpay_zcash_local`. Set `BTCPAY_POSTGRES` to reuse a custom real-wallet database.
+
 Install Rust/Cargo, Go, Python 3, Git and clang/libclang (`brew install go llvm`
 plus Xcode command-line tools on macOS; `apt install clang libclang-dev` on Linux).
 The wallet source defaults to the sibling `../zkool2` checkout; set `ZKOOL_SOURCE`
@@ -183,8 +187,10 @@ receipts and confirmation updates. History queries retain receipts already spent
 by the merchant. This uses zkool's existing `synchronize` and
 `transactionsByAccount(height:)` operations; no zkool GraphQL schema change is
 required. It recovers after wallet downtime but is not an independent fallback
-while that wallet is unavailable. The replay overlap does not implement full
-rollback of payments removed by a chain reorganization.
+while that wallet is unavailable. For receipts still reported by zkool, the listener recalculates the payment
+status from the latest confirmation count and the invoice threshold. A receipt
+can return to Processing. A missing receipt alone does not establish that a
+payment was invalidated.
 
 The mock-backed `offline-expired` browser case stops BTCPay detection, pays and
 mines while it is stopped, restarts with the wallet unavailable until the invoice
@@ -193,22 +199,23 @@ failure to verify the cursor remains unchanged, checks the recovered transaction
 account/diversifier and amount, and restarts again to check persistent, idempotent
 replay. It uses an isolated database and mock wallet even when regtest is available.
 
-New store imports persist a SHA-256 fingerprint of the trimmed viewing key rather
-than the key itself. A PostgreSQL advisory lock serializes store imports across
-server instances, and the wallet is checked for keys imported before fingerprints
-were introduced. The wallet still needs the actual viewing key for scanning. This
-prevents identical keys from being assigned to different stores; it is not a proof
-that different partial viewing keys cannot contain overlapping receiver keys.
+BTCPay accepts a network-specific unified full viewing key. Under its PostgreSQL
+import lock it checks the stock wallet’s exported receiving components, imports
+through `createAccount`, and compares the exported key before saving the binding.
+New wallet labels include the store ID and the fingerprint so a retry can reuse
+the original account. Invoice creation checks the binding before reserving an
+address. Greenfield settings updates preserve the server-owned binding.
 
-Recommended next migration step: an explicit administrator action to import the
-legacy config.json viewing key into the selected store, showing the destination
-store and original birth height before import. Reuse the duplicate-key checks,
-rescan from that birth height, and preserve the legacy config and wallet until
-verification succeeds. Importing the key alone does not migrate invoice/address
-ownership: legacy account IDs, diversifier indices and receiver-to-invoice mappings
-must also be reconciled before retiring the old backend. Starting a fresh receiving
-wallet is suitable for future invoices only; old invoice addresses still require
-monitoring. The one-time migration UI is not implemented yet.
+Run the hosted merchant regression against a stock zkool wallet and the
+real regtest stack and a temporary BTCPay database:
+
+```sh
+BTCPAY_RUN_PLAYWRIGHT=1 BTCPAY_TEST_WALLET=regtest dotnet test \
+  tests/BTCPayServer.Plugins.ZCash.IntegrationTests --filter FullyQualifiedName~TwoMerchantOwners
+```
+
+For the fresh-wallet cutover from walletd, follow the [upgrade instructions](../README.md#upgrading-to-20).
+Only the old wallet can monitor its outstanding addresses.
 
 ## Subscription latency tracing
 

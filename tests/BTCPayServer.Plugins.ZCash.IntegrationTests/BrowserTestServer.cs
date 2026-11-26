@@ -77,7 +77,9 @@ internal sealed class BrowserTestServer : IAsyncDisposable
             WorkingDirectory = Path.Combine(root.FullName, "btcpayserver", "BTCPayServer"),
             RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false
         };
-        start.ArgumentList.Add(Path.Combine(start.WorkingDirectory, "bin", "Debug", "net10.0", "BTCPayServer.dll"));
+        var package = Environment.GetEnvironmentVariable("BTCPAY_TEST_PLUGIN_PACKAGE");
+        var configuration = package is null ? "Debug" : "Release";
+        start.ArgumentList.Add(Path.Combine(start.WorkingDirectory, "bin", configuration, "net10.0", "BTCPayServer.dll"));
         start.ArgumentList.Add("--disable-registration"); start.ArgumentList.Add("false");
         // Prevent inherited local-launch settings from leaking into this isolated instance.
         foreach (var key in start.Environment.Keys.Where(k => k.StartsWith("BTCPAY_", StringComparison.OrdinalIgnoreCase) || k.StartsWith("ASPNETCORE_", StringComparison.OrdinalIgnoreCase)).ToArray()) start.Environment.Remove(key);
@@ -89,10 +91,21 @@ internal sealed class BrowserTestServer : IAsyncDisposable
         Env("BTCPAY_BIND", "127.0.0.1"); Env("BTCPAY_PORT", port.ToString());
         Env("BTCPAY_POSTGRES", cs.ConnectionString);
         Env("BTCPAY_DATADIR", Path.Combine(Artifacts, "data"));
-        Env("BTCPAY_PLUGINDIR", Path.Combine(Artifacts, "plugins"));
-        Env("BTCPAY_DEBUG_PLUGINS", Path.Combine(root.FullName, "Plugins", "ZCash", "bin", "Debug", "net10.0", "BTCPayServer.Plugins.ZCash.dll"));
+        const string plugin = "BTCPayServer.Plugins.ZCash";
+        var pluginDir = Path.Combine(Artifacts, "plugins");
+        Env("BTCPAY_PLUGINDIR", pluginDir);
+        if (package is null)
+            Env("BTCPAY_DEBUG_PLUGINS", Path.Combine(root.FullName, "Plugins", "ZCash", "bin", "Debug", "net10.0", plugin + ".dll"));
+        else
+        {
+            Directory.CreateDirectory(pluginDir);
+            File.Copy(package, Path.Combine(pluginDir, plugin + ".btcpay"));
+            BTCPayServer.Plugins.PluginManager.QueueCommands(pluginDir, ("install", plugin));
+        }
         Env("BTCPAY_ZEC_WALLET_BACKEND_TYPE", "ZkoolGraphQL");
         Env("BTCPAY_ZEC_WALLET_GRAPHQL_URI", graphqlUrl);
+        if (UsesRegtest && Environment.GetEnvironmentVariable("BTCPAY_TEST_GRAPHQL_TOKEN") is { Length: > 0 } token)
+            Env("BTCPAY_ZEC_WALLET_GRAPHQL_TOKEN", token);
         Env("BTCPAY_ZEC_WALLET_CASHCOW_URI", cashcowUrl);
         Env("BTCPAY_ZEC_CASHCOW_DAEMON_URI", rpcUrl);
         if (UsesRegtest) Env("BTCPAY_ZEC_CASHCOW_MINER_SEED", "burger voice warrior danger satoshi you solid atom elite alcohol category layer able debate culture talk tissue language hip surge fiction paddle stove voyage");

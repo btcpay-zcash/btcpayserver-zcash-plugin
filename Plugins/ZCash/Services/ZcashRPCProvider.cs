@@ -22,9 +22,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
         private readonly EventAggregator _eventAggregator;
         private readonly ZcashPluginDbContextFactory _dbContextFactory;
         private readonly BTCPayServerEnvironment environment;
-        public ImmutableDictionary<string, JsonRpcClient> DaemonRpcClients;
         public ImmutableDictionary<string, JsonRpcClient> CashcowDaemonRpcClients;
-        public ImmutableDictionary<string, JsonRpcClient> WalletRpcClients;
         public ImmutableDictionary<string, ZkoolGraphQlClient> CashCowWalletGraphQlClients;
         private const int MaturityThreshold = 100;
         private readonly string CashcowMinerSeed;
@@ -42,19 +40,14 @@ namespace BTCPayServer.Plugins.ZCash.Services
             IHttpClientFactory httpClientFactory,
             ZcashPluginDbContextFactory dbContextFactory,
             BTCPayServerEnvironment environment,
-            ILogger<ZcashRPCProvider> logger
+            ILoggerFactory loggerFactory
         )
         {
             _ZcashLikeConfiguration = ZcashLikeConfiguration;
             _eventAggregator = eventAggregator;
             _dbContextFactory = dbContextFactory;
             this.environment = environment;
-            _logger = logger;
-            DaemonRpcClients =
-                _ZcashLikeConfiguration.ZcashLikeConfigurationItems
-                    .Where(pair => pair.Value.WalletBackend == WalletBackend.Walletd && pair.Value.DaemonRpcUri is not null)
-                    .ToImmutableDictionary(pair => pair.Key,
-                        pair => new JsonRpcClient(pair.Value.DaemonRpcUri, "", "", httpClientFactory.CreateClient()));
+            _logger = loggerFactory.CreateLogger<ZcashRPCProvider>();
             CashcowDaemonRpcClients =
                 _ZcashLikeConfiguration.ZcashLikeConfigurationItems
                     .Where(pair => pair.Value.CashcowDaemonRpcUri is not null)
@@ -66,25 +59,11 @@ namespace BTCPayServer.Plugins.ZCash.Services
                     .Select(pair => pair.Value.CashcowMinerSeed)
                     .FirstOrDefault(seed => seed is not null)
                     ?.ToString();
-            WalletRpcClients =
-                _ZcashLikeConfiguration.ZcashLikeConfigurationItems
-                    .Where(pair => pair.Value.WalletBackend == WalletBackend.Walletd && pair.Value.InternalWalletRpcUri is not null)
-                    .ToImmutableDictionary(pair => pair.Key,
-                        pair => new JsonRpcClient(pair.Value.InternalWalletRpcUri, "", "", httpClientFactory.CreateClient()));
-            WalletBackends =
-                _ZcashLikeConfiguration.ZcashLikeConfigurationItems.ToImmutableDictionary(
-                    pair => pair.Key,
-                    pair => (IZcashWalletBackend)(pair.Value.WalletBackend switch
-                    {
-                        WalletBackend.ZkoolGraphQL => new ZkoolGraphQlBackend(pair.Key,
-                            new ZkoolGraphQlClient(pair.Value.GraphQlEndpointUri, httpClientFactory.CreateClient()),
-                            _dbContextFactory,
-                            this.environment
-                        ),
-                        _ => new ZcashWalletdBackend(pair.Key,
-                            new JsonRpcClient(pair.Value.DaemonRpcUri, "", "", httpClientFactory.CreateClient()),
-                            new JsonRpcClient(pair.Value.InternalWalletRpcUri, "", "", httpClientFactory.CreateClient()))
-                    }));
+            WalletBackends = _ZcashLikeConfiguration.ZcashLikeConfigurationItems
+                .Where(pair => pair.Value.WalletBackend == WalletBackend.ZkoolGraphQL)
+                .ToImmutableDictionary(pair => pair.Key, pair => (IZcashWalletBackend)new ZkoolGraphQlBackend(
+                    pair.Key, new ZkoolGraphQlClient(pair.Value.GraphQlEndpointUri, httpClientFactory.CreateClient(), pair.Value.GraphQlToken),
+                    _dbContextFactory, this.environment, loggerFactory.CreateLogger<ZkoolGraphQlBackend>()));
             CashCowWalletGraphQlClients =
                 _ZcashLikeConfiguration.ZcashLikeConfigurationItems
                     .Where(pair => pair.Value.CashCowEndpointUri is not null)
@@ -108,11 +87,11 @@ namespace BTCPayServer.Plugins.ZCash.Services
 
         public async Task<ZcashLikeSummary> UpdateSummary(string cryptoCode)
         {
-            Console.WriteLine($"UpdateSummary START for {cryptoCode}");
+            _logger.LogDebug("Updating wallet summary for {CryptoCode}", cryptoCode);
 
             if (!WalletBackends.TryGetValue(cryptoCode.ToUpperInvariant(), out var walletBackend))
             {
-                Console.WriteLine($"No backend found for {cryptoCode}. Available: {string.Join(",", WalletBackends.Keys)}");
+                _logger.LogDebug("No wallet backend configured for {CryptoCode}. Available backends: {Backends}", cryptoCode, WalletBackends.Keys);
                 return null;
             }
             CashcowDaemonRpcClients.TryGetValue(cryptoCode.ToUpperInvariant(), out var cashcowDaemonRpcClient);
@@ -121,7 +100,8 @@ namespace BTCPayServer.Plugins.ZCash.Services
             try
             {
                 var walletStatus = await walletBackend.GetSyncStatusAsync();
-                Console.WriteLine($"SyncStatus OK for {cryptoCode}: {walletStatus}");
+                _logger.LogDebug("Wallet sync status for {CryptoCode}: synced {Synced}, wallet height {WalletHeight}, target height {TargetHeight}",
+                    cryptoCode, walletStatus.Synced, walletStatus.WalletHeight, walletStatus.TargetHeight);
                 summary.CurrentHeight = walletStatus.CurrentHeight;
                 summary.WalletHeight = walletStatus.WalletHeight;
                 summary.TargetHeight = walletStatus.TargetHeight;
@@ -132,7 +112,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             }
             catch (Exception e)
             {
-                Console.WriteLine($"GetSyncStatusAsync THREW for {cryptoCode}, ${e}");
+                _logger.LogDebug(e, "Failed to get wallet sync status for {CryptoCode}", cryptoCode);
                 summary.DaemonAvailable = false;
                 summary.WalletAvailable = false;
             }
@@ -150,7 +130,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 _eventAggregator.Publish(new ZcashDaemonStateChange { Summary = summary, CryptoCode = cryptoCode });
             }
 
-            Console.WriteLine($"UpdateSummary END for {cryptoCode}: {summary}");
+            _logger.LogDebug("Updated wallet summary for {CryptoCode}: {Summary}", cryptoCode, summary);
             return summary;
         }
 
