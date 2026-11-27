@@ -67,8 +67,10 @@ BTCPAY_RUN_PLAYWRIGHT=1 BTCPAY_TEST_WALLET=regtest dotnet test \
   --filter 'Wallet=Regtest'
 ```
 
+CI uses Zebra 7.1.0 with zkool 6.37.0: both accept the reduced regtest
+ZIP-317 fee. Older Zebra releases reject zkool's default regtest transactions.
 The `zcash-regtest-results` Actions artifact contains the TRX report, BTCPay
-and regtest service logs, and any failure screenshots.
+and regtest service logs, and any failure screenshots and browser traces.
 
 ```sh
 dotnet test tests/BTCPayServer.Plugins.ZCash.IntegrationTests/BTCPayServer.Plugins.ZCash.IntegrationTests.csproj
