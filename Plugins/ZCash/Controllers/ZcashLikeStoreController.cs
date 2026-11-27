@@ -147,7 +147,10 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             vm.BindingUnavailable = true;
         }
 
-        [HttpGet("~/stores/{storeId}/onchain/{cryptoCode}")]
+        // Core's UIStoreOnChainWalletsController.SetupWallet serves this template for
+        // every other coin. Unconstrained, both endpoints match every request and
+        // routing fails with AmbiguousMatchException (HTTP 500).
+        [HttpGet("~/stores/{storeId}/onchain/{cryptoCode:regex(^zec$)}")]
         public IActionResult OnchainRedirect(string storeId, string cryptoCode)
         {
             return RedirectToAction(nameof(GetStoreZcashLikePaymentMethod), new { storeId, cryptoCode });
