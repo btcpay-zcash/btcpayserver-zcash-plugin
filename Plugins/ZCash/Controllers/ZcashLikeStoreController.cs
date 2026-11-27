@@ -4,7 +4,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
-using BTCPayServer.Plugins.ZCash.Data;
+using BTCPayServer.Events;
 using Microsoft.EntityFrameworkCore;
 using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Abstractions.Extensions;
@@ -39,13 +39,15 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
         private readonly ZcashRPCProvider _ZcashRpcProvider;
         private readonly PaymentMethodHandlerDictionary _handlers;
         private IStringLocalizer StringLocalizer { get; }
-        private readonly ZcashPluginDbContextFactory _dbContextFactory;
+        private const string LegacyNoticeDismissed = "BTCPayServer.Plugins.ZCash.LegacyWalletNoticeDismissed";
+        private readonly ApplicationDbContextFactory _dbContextFactory;
+        private readonly EventAggregator _events;
         private readonly ILogger<UIZcashLikeStoreController> _logger;
 
         public UIZcashLikeStoreController(ZcashLikeConfiguration ZcashLikeConfiguration,
             StoreRepository storeRepository, ZcashRPCProvider ZcashRpcProvider,
             PaymentMethodHandlerDictionary handlers,
-            IStringLocalizer stringLocalizer, ZcashPluginDbContextFactory dbContextFactory,
+            IStringLocalizer stringLocalizer, ApplicationDbContextFactory dbContextFactory, EventAggregator events,
             ILogger<UIZcashLikeStoreController> logger)
         {
             _ZcashLikeConfiguration = ZcashLikeConfiguration;
@@ -54,6 +56,7 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             _handlers = handlers;
             StringLocalizer = stringLocalizer;
             _dbContextFactory = dbContextFactory;
+            _events = events;
             _logger = logger;
         }
 
@@ -118,7 +121,15 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
 
         private async Task VerifyBindingAsync(ZcashLikePaymentMethodViewModel vm)
         {
-            if (vm.AccountIndex is not { } id) return;
+            if (vm.AccountIndex is not { } id)
+            {
+                if (_ZcashLikeConfiguration.ZcashLikeConfigurationItems[vm.CryptoCode].HasLegacyWalletDatabase)
+                {
+                    await using var db = _dbContextFactory.CreateContext();
+                    vm.ShowLegacyWalletNotice = !await db.Settings.AnyAsync(s => s.Id == LegacyNoticeDismissed);
+                }
+                return;
+            }
             var config = StoreData.GetPaymentMethodConfig<ZcashPaymentMethodConfig>(
                 PaymentTypes.CHAIN.GetPaymentMethodId(vm.CryptoCode), _handlers);
             try
@@ -198,9 +209,11 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                         long createdAccountIndex = 0;
                         await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
                         {
+                            db.ChangeTracker.Clear();
                             await using var importLock = await db.Database.BeginTransactionAsync();
                             await db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(802469320125)");
-                            var stores = await _StoreRepository.GetStores();
+                            var stores = await db.Stores.ToListAsync();
+                            store = stores.Single(s => s.Id == StoreData.Id);
                             foreach (var existingStore in stores)
                             {
                                 var existing = existingStore.GetPaymentMethodConfig<ZcashPaymentMethodConfig>(pmi, _handlers);
@@ -221,10 +234,14 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
                             config.ViewingKey = null;
                             config.BirthHeight = viewModel.BirthHeight;
                             store.SetPaymentMethodConfig(_handlers[pmi], config);
-                            await _StoreRepository.UpdateStore(store);
+                            if (_ZcashLikeConfiguration.ZcashLikeConfigurationItems[cryptoCode].HasLegacyWalletDatabase &&
+                                !await db.Settings.AnyAsync(s => s.Id == LegacyNoticeDismissed))
+                                db.Settings.Add(new SettingData { Id = LegacyNoticeDismissed, Value = "true" });
+                            await db.SaveChangesAsync();
                             await importLock.CommitAsync();
                             createdAccountIndex = newAccount.AccountIndex;
                         });
+                        _events.Publish(new StoreEvent.Updated(StoreData));
                         TempData.SetStatusMessageModel(new StatusMessageModel
                         {
                             Severity = StatusMessageModel.StatusSeverity.Success,
@@ -322,6 +339,8 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             public bool Enabled { get; set; }
             [BindNever]
             public bool BindingUnavailable { get; set; }
+            [BindNever]
+            public bool ShowLegacyWalletNotice { get; set; }
 
             [Range(0, int.MaxValue)]
             [Display(Name = "Birth Height")]

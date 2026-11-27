@@ -91,6 +91,7 @@ internal sealed class BrowserTestServer : IAsyncDisposable
         Env("BTCPAY_BIND", "127.0.0.1"); Env("BTCPAY_PORT", port.ToString());
         Env("BTCPAY_POSTGRES", cs.ConnectionString);
         Env("BTCPAY_DATADIR", Path.Combine(Artifacts, "data"));
+        Env("BTCPAY_ZEC_WALLET_DAEMON_WALLETDIR", Path.Combine(Artifacts, "legacy-wallet"));
         const string plugin = "BTCPayServer.Plugins.ZCash";
         var pluginDir = Path.Combine(Artifacts, "plugins");
         Env("BTCPAY_PLUGINDIR", pluginDir);

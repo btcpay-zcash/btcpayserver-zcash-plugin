@@ -38,25 +38,34 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
 {
     [LocalRegtestBrowserFact]
     [Trait("Category", "Playwright")]
+    [Trait("Wallet", "Regtest")]
     public Task RealZkoolSubscriptionPersistsPaymentWithinTwoSeconds() =>
-        StoreInvoiceIsPaidAndSettledThroughCheatMode("subscription-live");
+        RunCheckoutAsync("subscription-live");
 
     [LocalRegtestBrowserFact]
     [Trait("Category", "Playwright")]
+    [Trait("Wallet", "Regtest")]
     public Task RealZkoolSubscriptionStillReceivesPaymentsAfterIdleConnection() =>
-        StoreInvoiceIsPaidAndSettledThroughCheatMode("subscription-live-idle");
+        RunCheckoutAsync("subscription-live-idle");
 
     [LocalBrowserTheory]
     [InlineData("exact")]
     [InlineData("overpaid")]
     [InlineData("partial-new")]
     [InlineData("partial-old")]
+    [Trait("Category", "Playwright")]
+    [Trait("Wallet", "Regtest")]
+    public Task StoreInvoiceIsPaidAndSettledThroughCheatMode(string scenario) => RunCheckoutAsync(scenario);
+
+    [LocalBrowserTheory]
     [InlineData("offline-expired")]
     [InlineData("subscription-latency")]
     [Trait("Category", "Playwright")]
-    public async Task StoreInvoiceIsPaidAndSettledThroughCheatMode(string scenario)
+    public Task MockWalletRecoveryAndSubscription(string scenario) => RunCheckoutAsync(scenario, forceMock: true);
+
+    private async Task RunCheckoutAsync(string scenario, bool forceMock = false)
     {
-        await using var server = await BrowserTestServer.StartAsync(forceMock: scenario is "offline-expired" or "subscription-latency");
+        await using var server = await BrowserTestServer.StartAsync(forceMock: forceMock);
         using var playwright = await Playwright.CreateAsync();
         if (Environment.GetEnvironmentVariable("BTCPAY_PLAYWRIGHT_INSTALL") == "1")
             Assert.Equal(0, Microsoft.Playwright.Program.Main(["install", "chromium"]));
@@ -86,12 +95,29 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
             output.WriteLine($"Created store {storeId}");
 
             await page.GotoAsync($"/stores/{storeId}/Zcashlike/ZEC");
+            var legacyNotice = page.GetByText("This host has a legacy Zcash wallet.", new() { Exact = false });
+            if (scenario == "exact")
+            {
+                var directory = Directory.CreateDirectory(Path.Combine(server.Artifacts, "legacy-wallet"));
+                await Expect(legacyNotice).ToHaveCountAsync(0);
+                var earlierFilename = Path.Combine(directory.FullName, "zec-wallet.db");
+                File.WriteAllText(earlierFilename, "");
+                await page.ReloadAsync();
+                await Expect(legacyNotice).ToBeVisibleAsync();
+                File.Move(earlierFilename, Path.Combine(directory.FullName, "zec-wallet2.db"));
+                await page.ReloadAsync();
+                await Expect(legacyNotice).ToBeVisibleAsync();
+                await page.Locator("button[value='add-account']").ClickAsync();
+                await Expect(page.GetByText("A viewing key is required.", new() { Exact = true }).First).ToBeVisibleAsync();
+                await Expect(legacyNotice).ToBeVisibleAsync();
+            }
             output.WriteLine(server.UsesRegtest ? "Wallet: local regtest" : "Wallet: mock");
             var viewingKey = await NewViewingKeyAsync(server);
             await page.Locator("#WalletPassword").FillAsync(viewingKey);
             await page.Locator("#BirthHeight").FillAsync("1");
             await page.Locator("button[value='add-account']").ClickAsync();
             await Expect(page.Locator(".alert-success")).ToContainTextAsync("created for this store");
+            await Expect(legacyNotice).ToHaveCountAsync(0);
             await page.Locator("#Enabled").CheckAsync();
             // Require two confirmations so settlement cannot pass at zero confirmations.
             await page.Locator("#SettlementConfirmationThresholdChoice").SelectOptionAsync("4");
@@ -104,12 +130,16 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
 
             if (scenario == "exact")
             {
+                await server.RestartDetectionAsync();
+                Assert.True(File.Exists(Path.Combine(server.Artifacts, "legacy-wallet", "zec-wallet2.db")));
                 await page.GotoAsync("/stores/create");
                 await page.Locator("#Name").FillAsync("Duplicate viewing key test");
                 await page.Locator("#Create").ClickAsync();
                 await page.Locator("#menu-item-General").ClickAsync();
                 var secondStore = await page.Locator("#Id").InputValueAsync();
                 await page.GotoAsync($"/stores/{secondStore}/Zcashlike/ZEC");
+                await Expect(page.Locator("#WalletPassword")).ToBeVisibleAsync();
+                await Expect(legacyNotice).ToHaveCountAsync(0);
                 await page.Locator("button[value='add-account']").ClickAsync();
                 await Expect(page.GetByText("A viewing key is required.", new() { Exact = true }).First).ToBeVisibleAsync();
                 await page.Locator("#WalletPassword").FillAsync(viewingKey);
@@ -247,6 +277,7 @@ public class ZcashCheckoutPlaywrightTests(ITestOutputHelper output)
 
     [LocalBrowserFact]
     [Trait("Category", "Playwright")]
+    [Trait("Wallet", "Regtest")]
     public async Task TwoMerchantOwnersSettleInvoicesInSeparateWallets()
     {
         await using var server = await BrowserTestServer.StartAsync();

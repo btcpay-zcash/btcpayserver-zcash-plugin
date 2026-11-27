@@ -49,6 +49,27 @@ database (the launcher still starts the local cluster).
 
 ## Integration tests
 
+The [Zcash regtest workflow](../.github/workflows/regtest.yml) runs on pull
+requests, pushes to `master` and `dev`, and manual dispatch. It starts a fresh
+chain with the [zcash-regtest launcher](https://github.com/btcpay-zcash/zcash-regtest),
+PostgreSQL 16 and two stock zkool GraphQL wallets. Chromium drives BTCPay through
+exact, overpaid and partial payments, two-store settlement, and live and idle
+wallet subscriptions. The job requires the real wallet endpoints. The two
+browser scenarios that inject mock failures or events run separately when
+using the local Playwright suite.
+
+To repeat the CI selection locally, start the regtest stack and PostgreSQL as
+described below, install Playwright Chromium, and run:
+
+```sh
+BTCPAY_RUN_PLAYWRIGHT=1 BTCPAY_TEST_WALLET=regtest dotnet test \
+  tests/BTCPayServer.Plugins.ZCash.IntegrationTests \
+  --filter 'Wallet=Regtest'
+```
+
+The `zcash-regtest-results` Actions artifact contains the TRX report, BTCPay
+and regtest service logs, and any failure screenshots.
+
 ```sh
 dotnet test tests/BTCPayServer.Plugins.ZCash.IntegrationTests/BTCPayServer.Plugins.ZCash.IntegrationTests.csproj
 ```
@@ -70,8 +91,9 @@ The fixture/project structure references the
 [Monero plugin integration-test branch](https://github.com/btcpay-monero/btcpayserver-monero-plugin/tree/integration-test).
 That branch uses BTCPay's `UnitTestBase` and Playwright with Docker-backed services.
 Here the first stage substitutes isolated mock HTTP services, allowing its testing
-pattern and our existing cheatmode to be used on a macOS VM without Docker. The browser suite below launches the full server against these mocks. Real regtest
-coverage can replace mock endpoints with zkool/Zebra instances.
+pattern and our existing cheatmode to be used on a macOS VM without Docker.
+The browser suite launches the full server and can target either the mock or
+the real regtest stack.
 
 ## Playwright checkout coverage
 
@@ -110,8 +132,7 @@ BTCPAY_PLAYWRIGHT_INSTALL=0 BTCPAY_PLAYWRIGHT_CHANNEL=chrome ./scripts/test-play
 
 Server logs and isolated server configuration are saved under
 `TestResults/playwright/<run-id>/`. A failed browser flow also saves `failure.png`
-and a Playwright `trace.zip`. These artifacts are ignored by Git. This test still
-uses synthetic Zcash data; it does not replace real regtest chain coverage.
+and a Playwright `trace.zip`. These artifacts are ignored by Git.
 
 ## Real local regtest (no Docker)
 
