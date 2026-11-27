@@ -59,10 +59,10 @@ jobs:
           bin="$GITHUB_WORKSPACE/ci/zcash-regtest/tools/bin"
           mkdir -p "$bin"
           cd "$RUNNER_TEMP"
-          curl -fsSL --retry 3 -o zebra.tar.gz https://github.com/ZcashFoundation/zebra/releases/download/v6.2.1/zebrad-6.2.1-x86_64-unknown-linux-gnu.tar.gz
+          curl -fsSL --retry 3 -o zebra.tar.gz https://github.com/ZcashFoundation/zebra/releases/download/v7.1.0/zebrad-7.1.0-x86_64-unknown-linux-gnu.tar.gz
           curl -fsSL --retry 3 -o zkool_graphql https://github.com/hhanh00/zkool2/releases/download/zkool-v6.37.0/zkool_graphql
           sha256sum --check <<'SHA256'
-          a97088cd4689c0384b0ec25ffc3d77323efdfb72726d1e5be7986f4699672fa1  zebra.tar.gz
+          4b42a23e67fcce27f923882d369dad47f694aa608858f1cbbad70e4298e2ecae  zebra.tar.gz
           814ce10b4103b5c932a4a95761e6e7834e0b12b09f9316c803fddc4bbf1f8ca0  zkool_graphql
           SHA256
           tar -xzf zebra.tar.gz -C "$bin" zebrad
@@ -77,10 +77,13 @@ jobs:
         id: chain
         run: ci/zcash-regtest/scripts/regtest.sh start --fresh
       - name: Test payments against regtest
+        timeout-minutes: 35
         run: |
           dotnet test "$TEST_PROJECT" --no-build --configuration Debug \
             --filter 'Wallet=Regtest' \
-            --logger 'trx;LogFileName=regtest.trx' --results-directory TestResults/regtest
+            --blame-hang-timeout 6m \
+            --logger 'console;verbosity=normal' --logger 'trx;LogFileName=regtest.trx' \
+            --results-directory TestResults/regtest
           python3 - <<'PY'
           from xml.etree import ElementTree
           results = ElementTree.parse("TestResults/regtest/regtest.trx").findall(".//{*}UnitTestResult")
@@ -98,5 +101,6 @@ jobs:
             TestResults/regtest/*.trx
             TestResults/playwright/*/server.log
             TestResults/playwright/*/failure.png
+            TestResults/playwright/*/trace.zip
             ci/zcash-regtest/data/local/run-*/*.log
           retention-days: 7
