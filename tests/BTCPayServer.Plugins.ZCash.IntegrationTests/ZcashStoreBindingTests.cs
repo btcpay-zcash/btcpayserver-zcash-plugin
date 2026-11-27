@@ -11,7 +11,7 @@ public class ZcashStoreBindingTests
 {
     private static async Task<PaymentMethodConfigValidationContext> Validate(JObject? previous, JObject update)
     {
-        var handler = new ZcashLikePaymentMethodHandler(new ZcashLikeSpecificBtcPayNetwork { CryptoCode = "ZEC" }, null!);
+        var handler = new ZcashLikePaymentMethodHandler(new ZcashLikeSpecificBtcPayNetwork { CryptoCode = "ZEC" }, null!, Microsoft.Extensions.Logging.Abstractions.NullLogger<ZcashLikePaymentMethodHandler>.Instance);
         // BTCPay 2.4 adds a StoreData argument. The validator uses the same
         // model state and config properties on both supported host versions.
         var constructor = Assert.Single(typeof(PaymentMethodConfigValidationContext).GetConstructors());

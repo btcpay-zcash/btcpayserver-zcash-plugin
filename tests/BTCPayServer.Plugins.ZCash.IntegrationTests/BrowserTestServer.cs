@@ -167,6 +167,21 @@ internal sealed class BrowserTestServer : IAsyncDisposable
         response.EnsureSuccessStatusCode();
     }
 
+    public async Task SetMockNewAddressesLockedAsync(int calls)
+    {
+        if (mock == null) throw new InvalidOperationException("Requires the isolated mock wallet");
+        using var http = new HttpClient();
+        using var response = await http.PostAsync(mock.Urls.Single() + "/test/newaddresses-locked/" + calls, null);
+        response.EnsureSuccessStatusCode();
+    }
+
+    public async Task<int> GetMockNewAddressesCallsAsync()
+    {
+        if (mock == null) throw new InvalidOperationException("Requires the isolated mock wallet");
+        using var http = new HttpClient();
+        return int.Parse(await http.GetStringAsync(mock.Urls.Single() + "/test/newaddresses-calls"));
+    }
+
     public string ReadLog() { lock (logLock) return File.Exists(logPath) ? File.ReadAllText(logPath) : ""; }
 
     public async ValueTask DisposeAsync()

@@ -21,6 +21,7 @@ using NBitcoin;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using BTCPayServer.Plugins.ZCash.Services;
+using Microsoft.Extensions.Logging;
 
 namespace BTCPayServer.Plugins.ZCash.Payments
 {
@@ -30,13 +31,16 @@ namespace BTCPayServer.Plugins.ZCash.Payments
         public ZcashLikeSpecificBtcPayNetwork Network => _network;
         public JsonSerializer Serializer { get; }
         private readonly ZcashRPCProvider _ZcashRpcProvider;
+        private readonly ILogger<ZcashLikePaymentMethodHandler> _logger;
         public PaymentMethodId PaymentMethodId { get; }
-        public ZcashLikePaymentMethodHandler(BTCPayNetworkBase network, ZcashRPCProvider ZcashRpcProvider)
+        public ZcashLikePaymentMethodHandler(BTCPayNetworkBase network, ZcashRPCProvider ZcashRpcProvider,
+            ILogger<ZcashLikePaymentMethodHandler> logger)
         {
             _network = (ZcashLikeSpecificBtcPayNetwork)network;
             PaymentMethodId = PaymentTypes.CHAIN.GetPaymentMethodId(_network.CryptoCode);
             Serializer = BlobSerializer.CreateSerializer().Serializer;
             _ZcashRpcProvider = ZcashRpcProvider;
+            _logger = logger;
         }
         public Task BeforeFetchingRates(PaymentMethodContext context)
         {
@@ -77,6 +81,22 @@ namespace BTCPayServer.Plugins.ZCash.Payments
         }
 
         public async Task ConfigurePrompt(PaymentMethodContext context)
+        {
+            try
+            {
+                await ConfigurePromptCore(context);
+            }
+            catch (Exception ex) when (ex is not PaymentMethodUnavailableException and not OperationCanceledException)
+            {
+                // BTCPay records this only in the invoice's own event log and creates the
+                // invoice without this payment method, so make it visible in the server log.
+                _logger.LogError(ex, "{PaymentMethodId}: could not create the payment prompt for invoice {InvoiceId} of store {StoreId}; the invoice will not offer this payment method",
+                    PaymentMethodId, context.InvoiceEntity?.Id, context.Store?.Id);
+                throw;
+            }
+        }
+
+        private async Task ConfigurePromptCore(PaymentMethodContext context)
         {
             if (!_ZcashRpcProvider.IsAvailable(_network.CryptoCode))
                 throw new PaymentMethodUnavailableException($"Node or wallet not available");
