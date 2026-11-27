@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using BBTCPayServer.Plugins.ZCash.RPC;
 using BTCPayServer.Plugins.ZCash.Configuration;
 using BTCPayServer.Plugins.ZCash.RPC;
+using Microsoft.Extensions.Logging;
 
 namespace BTCPayServer.Plugins.ZCash.Services
 {
@@ -13,12 +14,15 @@ namespace BTCPayServer.Plugins.ZCash.Services
     {
         private readonly JsonRpcClient _daemonRpcClient;
         private readonly JsonRpcClient _walletRpcClient;
+        private readonly ILogger<ZcashWalletdBackend> _logger;
 
-        public ZcashWalletdBackend(string cryptoCode, JsonRpcClient daemonRpcClient, JsonRpcClient walletRpcClient)
+        public ZcashWalletdBackend(string cryptoCode, JsonRpcClient daemonRpcClient, JsonRpcClient walletRpcClient,
+            ILogger<ZcashWalletdBackend> logger)
         {
             CryptoCode = cryptoCode;
             _daemonRpcClient = daemonRpcClient;
             _walletRpcClient = walletRpcClient;
+            _logger = logger;
         }
 
         public string CryptoCode { get; }
@@ -30,7 +34,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
             var result = new WalletSyncStatus();
             try
             {
-              Console.WriteLine($"Start Walletd GetSyncStatusAsync");
+                _logger.LogDebug("Checking walletd sync status for {CryptoCode}", CryptoCode);
                 var daemonResult = await _daemonRpcClient.SendCommandAsync<JsonRpcClient.NoRequestModel, SyncInfoResponse>(
                     "sync_info",
                     JsonRpcClient.NoRequestModel.Instance,

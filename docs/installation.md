@@ -35,6 +35,8 @@ export BTCPAYGEN_ADDITIONAL_FRAGMENTS="$BTCPAYGEN_ADDITIONAL_FRAGMENTS;zcash-ful
 
 ## Existing BTCPayServer Instance
 
+Before upgrading a host that already accepts ZEC, follow the [wallet cutover instructions](../README.md#upgrading-to-20).
+
 As root, run `. btcpay-setup.sh`; this will show you the environment variable it is expecting. For example, if you support `btc` and `ltc` already, and want to add `zec`:
 
 
@@ -90,7 +92,11 @@ export BTCPAYGEN_ADDITIONAL_FRAGMENTS="$BTCPAYGEN_ADDITIONAL_FRAGMENTS;zcash-lig
 
 ## Setup Your (View-Only) Zcash Wallet
 
-Use a mobile or desktop wallet such as YWallet or Zingo, that supports a Viewing Key export.
+Configure the host’s private zkool GraphQL wallet as described in the [plugin configuration](../README.md#configuration).
+For each merchant store, export a unified full viewing key from a separate account
+in the merchant’s Zcash wallet. Sign in as a store owner, open **Wallets → ZEC**,
+import the key, then enable ZEC and save the confirmation threshold. Keep the
+merchant’s spending seed in their own wallet.
 
 
 ## Install and Setup Zcash Plugin

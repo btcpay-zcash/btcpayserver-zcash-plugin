@@ -33,7 +33,7 @@
                        ViewContext.RouteData.Values.TryGetValue("cryptoCode", out var cc) &&
                        cc is not null &&
                        (string)cc == item.CryptoCode;
-        <li class="nav-item">
+        <li class="nav-item" permission="@BTCPayServer.Client.Policies.CanModifyStoreSettings">
             <a class="nav-link @(isActive ? "active" : "")"
                asp-route-cryptoCode="@item.CryptoCode"
                asp-route-storeId="@storeId"

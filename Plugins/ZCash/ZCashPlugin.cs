@@ -1,7 +1,7 @@
 using BTCPayServer.Services;
 using System.Globalization;
 using System.Linq;
-using System.IO;
+using Microsoft.Extensions.Logging;
 using NBitcoin;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection;
@@ -74,7 +74,8 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
             var factory = provider.GetRequiredService<ZcashPluginDbContextFactory>();
             factory.ConfigureBuilder(optionsBuilder);
         });
-        services.AddHostedService<ZcashMigrationRunner>();
+        // Run schema upgrades in BTCPay's database startup phase, before hosted services.
+        services.AddSingleton<BTCPayServer.Data.IMigrationExecutor, ZcashMigrationRunner>();
         services.AddSingleton(provider =>
             (ICheckoutCheatModeExtension)ActivatorUtilities.CreateInstance(provider, typeof(ZcashCheckoutCheatModeExtension), [network, pmi]));
 
@@ -107,65 +108,49 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
                 configuration.GetOrDefault<string>(
                     $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_backend_type", null);
 
-            var walletBackendType =
-                !string.IsNullOrEmpty(walletBackendTypeStr) &&
-                Enum.TryParse<WalletBackend>(walletBackendTypeStr, true, out var parsed)
-                    ? parsed
-                    : WalletBackend.Walletd;
-            var daemonUri =
-                configuration.GetOrDefault<Uri?>($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_daemon_uri",
-                    null);
+            // Earlier versions defaulted to walletd even when a GraphQL URL was also present.
+            if (string.Equals(walletBackendTypeStr, "Walletd", StringComparison.OrdinalIgnoreCase) ||
+                (string.IsNullOrEmpty(walletBackendTypeStr) &&
+                 !string.IsNullOrEmpty(configuration[$"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_uri"])))
+            {
+                serviceProvider.GetRequiredService<ILogger<ZCashPlugin>>()
+                    .LogWarning("Legacy walletd is disabled for {CryptoCode}", ZcashLikeSpecificBtcPayNetwork.CryptoCode);
+                continue;
+            }
+            if (!string.IsNullOrEmpty(walletBackendTypeStr) &&
+                !string.Equals(walletBackendTypeStr, "ZkoolGraphQL", StringComparison.OrdinalIgnoreCase))
+                throw new ConfigException($"Unknown {ZcashLikeSpecificBtcPayNetwork.CryptoCode} wallet backend");
             var cashcowDaemonUri =
                 configuration.GetOrDefault<Uri?>($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_cashcow_daemon_uri",
                     null);
             var cashcowMinerSeed =
                 configuration.GetOrDefault<string?>($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_cashcow_miner_seed",
                     null);
-            var walletDaemonUri =
-                configuration.GetOrDefault<Uri?>(
-                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_uri", null);
             var graphQlEndpointUri =
                 configuration.GetOrDefault<Uri?>(
                     $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_graphql_uri", null);
             var cashcowEndpointUri =
                 configuration.GetOrDefault<Uri?>(
                     $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_cashcow_uri", null);
-            var walletDaemonWalletDirectory =
-                configuration.GetOrDefault<string?>(
-                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_walletdir", null);
-            var walletDaemonConfigFile =
-                configuration.GetOrDefault<string?>(
-                    $"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_config_path",
-                    string.IsNullOrEmpty(walletDaemonWalletDirectory) ? null : Path.Combine(walletDaemonWalletDirectory, "config.json"));
-            if (walletBackendType == WalletBackend.Walletd &&
-                (daemonUri == null || walletDaemonUri == null || walletDaemonWalletDirectory == null))
+            if (graphQlEndpointUri == null)
             {
-                throw new ConfigException($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode} is misconfigured");
-            }
-            if (walletBackendType == WalletBackend.ZkoolGraphQL && graphQlEndpointUri == null)
-            {
-                throw new ConfigException($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode} GraphQL wallet is misconfigured");
-            }
-            // Temp patch
-            if (!string.IsNullOrEmpty(walletDaemonWalletDirectory) && System.IO.File.Exists(Path.Combine(walletDaemonWalletDirectory, "zec-wallet2.db")) && walletDaemonConfigFile == Path.Combine(walletDaemonWalletDirectory, "config.json")) {
-                walletDaemonConfigFile = Path.Combine(walletDaemonWalletDirectory, "config2.json");
-            }
-            // Temp patch
-            if (walletDaemonConfigFile == "/data/config2.json" && !string.IsNullOrEmpty(walletDaemonWalletDirectory)) {
-                walletDaemonConfigFile = Path.Combine(walletDaemonWalletDirectory, "config2.json");
+                if (string.IsNullOrEmpty(walletBackendTypeStr))
+                {
+                    serviceProvider.GetRequiredService<ILogger<ZCashPlugin>>()
+                        .LogWarning("Zcash wallet disabled. Configure the Zkool GraphQL wallet endpoint to enable it.");
+                    continue;
+                }
+                throw new ConfigException($"{ZcashLikeSpecificBtcPayNetwork.CryptoCode} GraphQL wallet endpoint is missing");
             }
 
             result.ZcashLikeConfigurationItems.Add(ZcashLikeSpecificBtcPayNetwork.CryptoCode, new ZcashLikeConfigurationItem()
             {
-                DaemonRpcUri = daemonUri,
                 CashcowDaemonRpcUri = cashcowDaemonUri,
                 CashcowMinerSeed = cashcowMinerSeed,
-                InternalWalletRpcUri = walletDaemonUri,
                 GraphQlEndpointUri = graphQlEndpointUri,
+                GraphQlToken = configuration[$"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_graphql_token"],
                 CashCowEndpointUri = cashcowEndpointUri,
-                WalletDirectory = walletDaemonWalletDirectory,
-                ConfigFile = walletDaemonConfigFile,
-                WalletBackend = walletBackendType
+                WalletBackend = WalletBackend.ZkoolGraphQL
             });
         }
         return result;

@@ -17,7 +17,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
     {
         private readonly GraphQLHttpClient _client;
 
-        public ZkoolGraphQlClient(Uri httpEndpoint, HttpClient httpClient)
+        public ZkoolGraphQlClient(Uri httpEndpoint, HttpClient httpClient, string authToken = null)
         {
             var wsEndpoint = new UriBuilder(httpEndpoint)
             {
@@ -36,6 +36,12 @@ namespace BTCPayServer.Plugins.ZCash.Services
                 ConfigureWebsocketOptions = options => options.KeepAliveInterval = Timeout.InfiniteTimeSpan
             };
 
+            if (!string.IsNullOrEmpty(authToken))
+            {
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", authToken);
+                options.ConfigureWebSocketConnectionInitPayload = _ => new { authToken };
+            }
+
             var serializer = new NewtonsoftJsonSerializer(new JsonSerializerSettings
             {
                 ContractResolver = new CamelCasePropertyNamesContractResolver(),
@@ -48,15 +54,7 @@ namespace BTCPayServer.Plugins.ZCash.Services
         public async Task<JObject> SendAsync(string query, object variables = null, CancellationToken cancellationToken = default)
         {
             var request = new GraphQLRequest { Query = query, Variables = variables };
-                // Console.WriteLine("=== GraphQL Request ===");
-                // Console.WriteLine($"Query: {query}");
-                // Console.WriteLine($"Variables: {JsonConvert.SerializeObject(variables)}");
-
-                var response = await _client.SendQueryAsync<JObject>(request, cancellationToken);
-
-                // Console.WriteLine("=== GraphQL Response ===");
-                // Console.WriteLine($"Data: {response.Data?.ToString(Formatting.Indented)}");
-            // var response = await _client.SendQueryAsync<JObject>(request, cancellationToken);
+            var response = await _client.SendQueryAsync<JObject>(request, cancellationToken);
 
             if (response.Errors?.Any() is true)
                 throw new GraphQlApiException(response.Errors.Select(e => e.Message));
