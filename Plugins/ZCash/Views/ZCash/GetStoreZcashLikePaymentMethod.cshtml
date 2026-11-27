@@ -50,6 +50,10 @@
             {
                 <div class="card my-2">
                     <h3 class="card-title p-2" text-translate="true">Create Wallet</h3>
+                    @if (Model.ShowLegacyWalletNotice)
+                    {
+                        <p class="alert alert-warning mx-2" text-translate="true">This host has a legacy Zcash wallet. Create a previously unused receiving account in your wallet and enter its unified full viewing key below. Reusing an old account can cause a past payment to be credited to a new invoice. Keep the old wallet available for payments to earlier invoices.</p>
+                    }
                     <div class="form-group p-2">
                         <label asp-for="BirthHeight" class="form-label"></label>
                         <input class="form-control" asp-for="BirthHeight">

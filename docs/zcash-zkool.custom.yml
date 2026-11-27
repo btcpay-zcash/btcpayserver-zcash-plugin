@@ -1,5 +1,5 @@
 services:
-  zcash_walletd:
+  zkool_graphql:
     restart: unless-stopped
     init: true
     image: hhanh00/zkool-graphql:6.37.0
@@ -28,11 +28,15 @@ services:
   btcpayserver:
     environment:
       BTCPAY_ZEC_WALLET_BACKEND_TYPE: ZkoolGraphQL
-      BTCPAY_ZEC_WALLET_GRAPHQL_URI: http://zcash_walletd:8000/graphql
+      BTCPAY_ZEC_WALLET_GRAPHQL_URI: http://zkool_graphql:8000/graphql
+      BTCPAY_ZEC_WALLET_DAEMON_WALLETDIR: /root/zec_wallet
+    volumes:
+      - zec_wallet:/root/zec_wallet:ro
 
 volumes:
   # A fresh receiving database keeps the legacy wallet volume available for recovery.
   zec_graphql_wallet:
+  zec_wallet:
 
 exclusive:
   - zcash-node

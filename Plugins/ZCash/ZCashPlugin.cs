@@ -148,6 +148,7 @@ public class ZCashPlugin : BaseBTCPayServerPlugin
                 CashcowDaemonRpcUri = cashcowDaemonUri,
                 CashcowMinerSeed = cashcowMinerSeed,
                 GraphQlEndpointUri = graphQlEndpointUri,
+                WalletDirectory = configuration[$"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_daemon_walletdir"],
                 GraphQlToken = configuration[$"{ZcashLikeSpecificBtcPayNetwork.CryptoCode}_wallet_graphql_token"],
                 CashCowEndpointUri = cashcowEndpointUri,
                 WalletBackend = WalletBackend.ZkoolGraphQL
