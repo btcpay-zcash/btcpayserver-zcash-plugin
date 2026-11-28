@@ -22,14 +22,14 @@ internal sealed class BrowserTestServer : IAsyncDisposable
     public string Artifacts { get; private set; } = "";
     private string logPath => Path.Combine(Artifacts, "server.log");
 
-    public static async Task<BrowserTestServer> StartAsync(bool forceMock = false)
+    public static async Task<BrowserTestServer> StartAsync(bool forceMock = false, string chains = "zec")
     {
         var result = new BrowserTestServer();
-        try { await result.StartCoreAsync(forceMock); return result; }
+        try { await result.StartCoreAsync(forceMock, chains); return result; }
         catch { await result.DisposeAsync(); throw; }
     }
 
-    private async Task StartCoreAsync(bool forceMock)
+    private async Task StartCoreAsync(bool forceMock, string chains)
     {
         var root = new DirectoryInfo(AppContext.BaseDirectory);
         while (root != null && !File.Exists(Path.Combine(root.FullName, "btcpay-zcash-plugin.sln"))) root = root.Parent;
@@ -87,7 +87,7 @@ internal sealed class BrowserTestServer : IAsyncDisposable
         DatabaseConnectionString = cs.ConnectionString;
         void Env(string key, string value) => start.Environment[key] = value;
         Env("ASPNETCORE_ENVIRONMENT", "Development");
-        Env("BTCPAY_NETWORK", "regtest"); Env("BTCPAY_CHAINS", "zec"); Env("BTCPAY_CHEATMODE", "true");
+        Env("BTCPAY_NETWORK", "regtest"); Env("BTCPAY_CHAINS", chains); Env("BTCPAY_CHEATMODE", "true");
         Env("BTCPAY_BIND", "127.0.0.1"); Env("BTCPAY_PORT", port.ToString());
         Env("BTCPAY_POSTGRES", cs.ConnectionString);
         Env("BTCPAY_DATADIR", Path.Combine(Artifacts, "data"));
