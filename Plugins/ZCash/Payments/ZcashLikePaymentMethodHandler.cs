@@ -86,7 +86,7 @@ namespace BTCPayServer.Plugins.ZCash.Payments
             {
                 await ConfigurePromptCore(context);
             }
-            catch (Exception ex) when (ex is not PaymentMethodUnavailableException and not OperationCanceledException)
+            catch (Exception ex) when (ex is not PaymentMethodUnavailableException)
             {
                 // BTCPay records this only in the invoice's own event log and creates the
                 // invoice without this payment method, so make it visible in the server log.

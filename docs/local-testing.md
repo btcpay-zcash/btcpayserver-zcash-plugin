@@ -56,7 +56,8 @@ PostgreSQL 16 and two stock zkool GraphQL wallets. Chromium drives BTCPay throug
 exact, overpaid and partial payments, two-store settlement, and live and idle
 wallet subscriptions. The job requires the real wallet endpoints. The two
 browser scenarios that inject mock failures or events run separately when
-using the local Playwright suite.
+using the local Playwright suite. CI also runs the mock-backed address retry
+browser tests separately.
 
 To repeat the CI selection locally, start the regtest stack and PostgreSQL as
 described below, install Playwright Chromium, and run:
@@ -65,6 +66,9 @@ described below, install Playwright Chromium, and run:
 BTCPAY_RUN_PLAYWRIGHT=1 BTCPAY_TEST_WALLET=regtest dotnet test \
   tests/BTCPayServer.Plugins.ZCash.IntegrationTests \
   --filter 'Wallet=Regtest'
+BTCPAY_RUN_PLAYWRIGHT=1 dotnet test \
+  tests/BTCPayServer.Plugins.ZCash.IntegrationTests \
+  --filter 'FullyQualifiedName~ZcashAddressRetryTests'
 ```
 
 CI uses Zebra 7.1.0 with zkool 6.37.0: both accept the reduced regtest

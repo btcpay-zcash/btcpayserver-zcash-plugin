@@ -12,7 +12,7 @@ permissions:
 jobs:
   checkout-payments:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:16
@@ -89,6 +89,22 @@ jobs:
           results = ElementTree.parse("TestResults/regtest/regtest.trx").findall(".//{*}UnitTestResult")
           if not results or any(r.get("outcome") != "Passed" for r in results):
               raise SystemExit("Expected all selected regtest cases to execute and pass")
+          PY
+      - name: Test address retries in checkout
+        timeout-minutes: 10
+        run: |
+          dotnet test "$TEST_PROJECT" --no-build --configuration Debug \
+            --filter 'FullyQualifiedName~ZcashAddressRetryTests' \
+            --blame-hang-timeout 6m \
+            --logger 'console;verbosity=normal' --logger 'trx;LogFileName=address-retry.trx' \
+            --results-directory TestResults/regtest
+          python3 - <<'PY'
+          from xml.etree import ElementTree
+          results = ElementTree.parse("TestResults/regtest/address-retry.trx").findall(".//{*}UnitTestResult")
+          if (any(r.get("outcome") != "Passed" for r in results)
+              or sum("InvoiceKeepsZcashWhenNewAddressesIsBrieflyLocked" in r.get("testName", "") for r in results) != 2
+              or sum("PersistentLockGivesUpAndLogsTheDroppedPaymentMethod" in r.get("testName", "") for r in results) != 1):
+              raise SystemExit("Expected all address retry browser cases to execute and pass")
           PY
       - name: Stop regtest
         if: always() && (steps.chain.outcome == 'success' || steps.chain.outcome == 'failure')
