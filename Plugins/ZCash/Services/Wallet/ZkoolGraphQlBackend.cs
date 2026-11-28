@@ -514,9 +514,27 @@ query {
             return account["id"]?.Value<long>() ?? accountIndex;
         }
 
+        // zkool before 6.36 opens newAddresses' transaction as DEFERRED. While a
+        // synchronize holds SQLite's write lock, the read-to-write upgrade fails at
+        // once with "database is locked" instead of waiting on the busy timeout
+        // (hhanh00/zkool2#1458). The failed transaction rolls back without using a
+        // diversifier index, so the call is safe to repeat.
+        internal static readonly TimeSpan[] NewAddressRetryDelays =
+        {
+            TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(500)
+        };
+
+        internal static bool IsDatabaseLocked(ZkoolGraphQlClient.GraphQlApiException ex) =>
+            ex.Message.Contains("database is locked", StringComparison.OrdinalIgnoreCase);
+
         private async Task<WalletAddress> CreateOrGetAddressAsync(long accountId, CancellationToken cancellationToken)
         {
-            var data = await _graphQlClient.SendAsync(@"
+            JObject data;
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    data = await _graphQlClient.SendAsync(@"
 mutation($idAccount: Int!) {
   newAddresses(idAccount: $idAccount) {
     ua
@@ -526,7 +544,17 @@ mutation($idAccount: Int!) {
     diversifierIndex
   }
 }", new { idAccount = accountId }, cancellationToken);
-            
+                    break;
+                }
+                catch (ZkoolGraphQlClient.GraphQlApiException ex) when (IsDatabaseLocked(ex) && attempt < NewAddressRetryDelays.Length)
+                {
+                    var delay = NewAddressRetryDelays[attempt];
+                    _logger.LogWarning("{CryptoCode}: newAddresses for wallet account {AccountId} found the wallet database locked; retrying in {Delay} ms (retry {Retry} of {Retries})",
+                        CryptoCode, accountId, (int)delay.TotalMilliseconds, attempt + 1, NewAddressRetryDelays.Length);
+                    await Task.Delay(delay, cancellationToken);
+                }
+            }
+
             var addresses = MapAddress(data["newAddresses"]);
             
             await using var ctx = _dbContextFactory.CreateContext();

@@ -40,11 +40,24 @@ public static class MockWalletServer
                     { ["events"] = new JsonObject { ["type"] = "TX", ["height"] = 0, ["txid"] = txid } } }
                 });
         };
+        // zkool < 6.36 fails newAddresses this way while a synchronize holds SQLite's
+        // write lock. The failed call rolls back, so no diversifier index is used.
+        var lockedNewAddresses = 0;
+        var newAddressesCalls = 0;
+        app.MapPost("/test/newaddresses-locked/{count:int}", (int count) => { Volatile.Write(ref lockedNewAddresses, count); return Results.Ok(); });
+        app.MapGet("/test/newaddresses-calls", () => Volatile.Read(ref newAddressesCalls));
         app.MapGet("/health", () => Results.Ok(new { mock = true }));
         app.MapPost("/graphql", async (HttpContext context) =>
         {
             if (!available) return Results.StatusCode(503);
             var body = await JsonNode.ParseAsync(context.Request.Body) ?? new JsonObject();
+            if (body["query"]?.GetValue<string>()?.Contains("newAddresses") is true)
+            {
+                Interlocked.Increment(ref newAddressesCalls);
+                if (Interlocked.Decrement(ref lockedNewAddresses) >= 0)
+                    return Results.Json(new { errors = new[] { new { message = "error returned from database: (code: 5) database is locked" } } });
+                Interlocked.Exchange(ref lockedNewAddresses, 0);
+            }
             try { return Results.Json(new { data = wallet.Query(body) }); }
             catch (ArgumentException e) { return Results.Json(new { errors = new[] { new { message = e.Message } } }); }
         });
