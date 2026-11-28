@@ -1,0 +1,42 @@
+services:
+  zkool_graphql:
+    restart: unless-stopped
+    init: true
+    image: hhanh00/zkool-graphql:6.37.0
+    command:
+      - --db-path
+      - /data/zec-graphql.db
+      - --coin
+      - "0"
+      - --lwd-url
+      - https://zec.rocks:443
+      - --bind-address
+      - 0.0.0.0
+      - --port
+      - "8000"
+      # Every client on the wallet network has full access in this mode.
+      - --allow-unauthenticated
+      - --allow-unencrypted-database
+    environment:
+      HOME: /data
+      RUST_LOG: info
+    expose:
+      - "8000"
+    volumes:
+      - zec_graphql_wallet:/data
+
+  btcpayserver:
+    environment:
+      BTCPAY_ZEC_WALLET_BACKEND_TYPE: ZkoolGraphQL
+      BTCPAY_ZEC_WALLET_GRAPHQL_URI: http://zkool_graphql:8000/graphql
+      BTCPAY_ZEC_WALLET_DAEMON_WALLETDIR: /root/zec_wallet
+    volumes:
+      - zec_wallet:/root/zec_wallet:ro
+
+volumes:
+  # A fresh receiving database keeps the legacy wallet volume available for recovery.
+  zec_graphql_wallet:
+  zec_wallet:
+
+exclusive:
+  - zcash-node

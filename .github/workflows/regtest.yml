@@ -1,0 +1,122 @@
+name: Zcash regtest
+
+on:
+  pull_request:
+  push:
+    branches: [master, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checkout-payments:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: btcpay
+          POSTGRES_PASSWORD: regtest-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U btcpay"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      BTCPAY_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Username=btcpay;Password=regtest-only;Database=postgres
+      BTCPAY_RUN_PLAYWRIGHT: '1'
+      BTCPAY_TEST_WALLET: regtest
+      TEST_PROJECT: tests/BTCPayServer.Plugins.ZCash.IntegrationTests
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: btcpay-zcash/zcash-regtest
+          ref: 0ffb1b5a77e3662ec46fe659f04f8d293eb467b5
+          path: ci/zcash-regtest
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: zecrocks/lightwalletd
+          ref: 09593edbee4ee68d47e5a53f8ce1c83514c4e8e6
+          path: ci/lightwalletd
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ci/lightwalletd/go.mod
+          cache-dependency-path: ci/lightwalletd/go.sum
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install regtest binaries
+        run: |
+          bin="$GITHUB_WORKSPACE/ci/zcash-regtest/tools/bin"
+          mkdir -p "$bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o zebra.tar.gz https://github.com/ZcashFoundation/zebra/releases/download/v7.1.0/zebrad-7.1.0-x86_64-unknown-linux-gnu.tar.gz
+          curl -fsSL --retry 3 -o zkool_graphql https://github.com/hhanh00/zkool2/releases/download/zkool-v6.37.0/zkool_graphql
+          sha256sum --check <<'SHA256'
+          4b42a23e67fcce27f923882d369dad47f694aa608858f1cbbad70e4298e2ecae  zebra.tar.gz
+          814ce10b4103b5c932a4a95761e6e7834e0b12b09f9316c803fddc4bbf1f8ca0  zkool_graphql
+          SHA256
+          tar -xzf zebra.tar.gz -C "$bin" zebrad
+          install -m 755 zkool_graphql "$bin/zkool_graphql"
+          go build -C "$GITHUB_WORKSPACE/ci/lightwalletd" -o "$bin/lightwalletd" .
+
+      - name: Build BTCPay and install Chromium
+        run: |
+          dotnet build "$TEST_PROJECT" --configuration Debug -m:1
+          pwsh "$TEST_PROJECT/bin/Debug/net10.0/playwright.ps1" install --with-deps chromium
+      - name: Start a fresh regtest chain and wallets
+        id: chain
+        run: ci/zcash-regtest/scripts/regtest.sh start --fresh
+      - name: Test payments against regtest
+        timeout-minutes: 35
+        run: |
+          dotnet test "$TEST_PROJECT" --no-build --configuration Debug \
+            --filter 'Wallet=Regtest' \
+            --blame-hang-timeout 6m \
+            --logger 'console;verbosity=normal' --logger 'trx;LogFileName=regtest.trx' \
+            --results-directory TestResults/regtest
+          python3 - <<'PY'
+          from xml.etree import ElementTree
+          results = ElementTree.parse("TestResults/regtest/regtest.trx").findall(".//{*}UnitTestResult")
+          if not results or any(r.get("outcome") != "Passed" for r in results):
+              raise SystemExit("Expected all selected regtest cases to execute and pass")
+          PY
+      - name: Test address retries in checkout
+        timeout-minutes: 10
+        run: |
+          dotnet test "$TEST_PROJECT" --no-build --configuration Debug \
+            --filter 'FullyQualifiedName~ZcashAddressRetryTests' \
+            --blame-hang-timeout 6m \
+            --logger 'console;verbosity=normal' --logger 'trx;LogFileName=address-retry.trx' \
+            --results-directory TestResults/regtest
+          python3 - <<'PY'
+          from xml.etree import ElementTree
+          results = ElementTree.parse("TestResults/regtest/address-retry.trx").findall(".//{*}UnitTestResult")
+          if (any(r.get("outcome") != "Passed" for r in results)
+              or sum("InvoiceKeepsZcashWhenNewAddressesIsBrieflyLocked" in r.get("testName", "") for r in results) != 2
+              or sum("PersistentLockGivesUpAndLogsTheDroppedPaymentMethod" in r.get("testName", "") for r in results) != 1):
+              raise SystemExit("Expected all address retry browser cases to execute and pass")
+          PY
+      - name: Stop regtest
+        if: always() && (steps.chain.outcome == 'success' || steps.chain.outcome == 'failure')
+        run: ci/zcash-regtest/scripts/regtest.sh stop
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zcash-regtest-results
+          path: |
+            TestResults/regtest/*.trx
+            TestResults/playwright/*/server.log
+            TestResults/playwright/*/failure.png
+            TestResults/playwright/*/trace.zip
+            ci/zcash-regtest/data/local/run-*/*.log
+          retention-days: 7

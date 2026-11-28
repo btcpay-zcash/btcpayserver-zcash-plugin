@@ -1,0 +1,74 @@
+name: Database migrations
+
+on:
+  pull_request:
+  push:
+    branches: [master, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        btcpay: [pinned, v2.4.7]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: btcpay
+          POSTGRES_PASSWORD: migration-test-only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U btcpay"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BTCPAY_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Username=btcpay;Password=migration-test-only;Database=postgres
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Protect released migrations
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/check-migration-history.py "$BASE_SHA"
+      - name: Protect migration history on branch updates
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: python3 scripts/check-migration-history.py "$BASE_SHA"
+      - name: Select compatibility version
+        if: matrix.btcpay != 'pinned'
+        env:
+          BTCPAY_VERSION: ${{ matrix.btcpay }}
+        run: |
+          git -C btcpayserver fetch --depth 1 origin "refs/tags/$BTCPAY_VERSION"
+          git -C btcpayserver checkout --detach FETCH_HEAD
+          git -C btcpayserver submodule update --init --recursive
+      - name: Check migrations, wallet bindings, recovery, and shutdown
+        run: >-
+          dotnet test tests/BTCPayServer.Plugins.ZCash.IntegrationTests/BTCPayServer.Plugins.ZCash.IntegrationTests.csproj
+          --configuration Release -m:1
+          --filter 'Category!=Playwright'
+          --logger 'trx;LogFileName=migrations.trx'
+          --results-directory TestResults/migrations
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: migration-tests-${{ matrix.btcpay }}
+          path: TestResults/migrations

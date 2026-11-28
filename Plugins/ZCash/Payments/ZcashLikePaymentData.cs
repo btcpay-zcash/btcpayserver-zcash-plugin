@@ -6,6 +6,10 @@ using BTCPayServer.Services.Invoices;
 
 namespace BTCPayServer.Plugins.ZCash.Payments
 {
+    /// <summary>
+    /// Per-payment transaction data. One record per detected on-chain payment.
+    /// No config or threshold data — those live in PromptDetails.
+    /// </summary>
     public class ZcashLikePaymentData
     {
         public long SubaddressIndex { get; set; }

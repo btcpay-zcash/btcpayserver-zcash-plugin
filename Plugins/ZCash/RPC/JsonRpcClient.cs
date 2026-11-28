@@ -23,6 +23,46 @@ namespace BTCPayServer.Plugins.ZCash.RPC
             _password = password;
             _httpClient = client ?? new HttpClient();
         }
+        
+        public async Task<TResult> SendRpc10CommandAsync<TParams, TResult>(
+            string method,
+            TParams parameters,
+            CancellationToken cts = default)
+        {
+            var jsonSerializer = new JsonSerializerSettings
+            {
+                ContractResolver = new CamelCasePropertyNamesContractResolver()
+            };
+
+            var command = new JsonRpcCommand<TParams>(method, parameters);
+
+            var httpRequest = new HttpRequestMessage
+            {
+                Method = HttpMethod.Post,
+                RequestUri = _address,
+                Content = new StringContent(
+                    JsonConvert.SerializeObject(command, jsonSerializer),
+                    Encoding.UTF8, "application/json")
+            };
+
+            if (!string.IsNullOrEmpty(_username))
+            {
+                httpRequest.Headers.Authorization = new AuthenticationHeaderValue(
+                    "Basic",
+                    Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_username}:{_password}")));
+            }
+
+            var rawResult = await _httpClient.SendAsync(httpRequest, cts);
+            var rawJson = await rawResult.Content.ReadAsStringAsync();
+            rawResult.EnsureSuccessStatusCode();
+
+            var response = JsonConvert.DeserializeObject<JsonRpcResult<TResult>>(rawJson, jsonSerializer);
+
+            if (response?.Error != null)
+                throw new JsonRpcApiException { Error = response.Error };
+
+            return response.Result;
+        }
 
 
         public async Task<TResponse> SendCommandAsync<TRequest, TResponse>(string method, TRequest data,

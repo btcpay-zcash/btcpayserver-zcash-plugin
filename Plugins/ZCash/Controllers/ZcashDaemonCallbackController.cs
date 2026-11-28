@@ -24,12 +24,13 @@ namespace BTCPayServer.Plugins.ZCash.Controllers
             return Ok();
         }
         [HttpGet("tx")]
-        public IActionResult OnTransactionNotify(string hash, string cryptoCode)
+        public IActionResult OnTransactionNotify(string hash, string cryptoCode, long accountIndex)
         {
             _eventAggregator.Publish(new ZcashEvent()
             {
                 TransactionHash = hash,
-                CryptoCode = cryptoCode.ToUpperInvariant()
+                CryptoCode = cryptoCode.ToUpperInvariant(),
+                AccountIndex = accountIndex
             });
             return Ok();
         }
